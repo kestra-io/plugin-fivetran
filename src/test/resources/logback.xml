@@ -19,7 +19,4 @@
 
     <logger name="io.kestra" level="INFO" />
     <logger name="flow" level="INFO" />
-
-    <logger name="io.micronaut.http.client" level="TRACE" />
-
 </configuration>
