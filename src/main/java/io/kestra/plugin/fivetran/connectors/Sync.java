@@ -25,7 +25,7 @@ import org.slf4j.Logger;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
-import javax.validation.constraints.NotNull;
+import jakarta.validation.constraints.NotNull;
 
 import static io.kestra.core.utils.Rethrow.throwSupplier;
 
