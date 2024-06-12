@@ -3,6 +3,7 @@ package io.kestra.plugin.fivetran;
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.tasks.Task;
+import io.kestra.core.runners.DefaultRunContext;
 import io.kestra.core.runners.RunContext;
 import io.micronaut.core.type.Argument;
 import io.micronaut.http.HttpResponse;
@@ -49,7 +50,7 @@ public abstract class AbstractFivetranConnection extends Task {
     private static final NettyHttpClientFactory FACTORY = new NettyHttpClientFactory();
 
     protected HttpClient client(RunContext runContext) throws IllegalVariableEvaluationException, MalformedURLException, URISyntaxException {
-        MediaTypeCodecRegistry mediaTypeCodecRegistry = runContext.getApplicationContext().getBean(MediaTypeCodecRegistry.class);
+        MediaTypeCodecRegistry mediaTypeCodecRegistry = ((DefaultRunContext)runContext).getApplicationContext().getBean(MediaTypeCodecRegistry.class);
 
         DefaultHttpClient client = (DefaultHttpClient) FACTORY.createClient(URI.create("https://api.fivetran.com").toURL(), new DefaultHttpClientConfiguration());
         client.setMediaTypeCodecRegistry(mediaTypeCodecRegistry);
