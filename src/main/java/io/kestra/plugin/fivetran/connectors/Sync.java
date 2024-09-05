@@ -35,22 +35,29 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 @Getter
 @NoArgsConstructor
 @Schema(
-    title = "Run a sync on a connection"
+    title = "Run a sync on a connection."
 )
 @Plugin(
     examples = {
         @Example(
-            code = {
-                "apiKey: \"<apiKey>\"",
-                "apiSecret: \"<apiKey>\"",
-                "connectorId: \"<connectorId>\""
-            }
+            full = true,
+            code = """
+                id: fivetran_sync
+                namespace: company.team
+
+                tasks:
+                  - id: sync
+                    type: io.kestra.plugin.fivetran.connectors.Sync
+                    apiKey: "api_key"
+                    apiSecret: "api_secret"
+                    connectorId: "connector_id"
+                """
         )
     }
 )
 public class Sync extends AbstractFivetranConnection implements RunnableTask<VoidOutput> {
     @Schema(
-        title = "The connector id to sync"
+        title = "The connector id to sync."
     )
     @PluginProperty(dynamic = true)
     @NotNull
@@ -59,7 +66,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
     @Schema(
         title = "Force with running sync.",
         description = "If `force` is true and the connector is currently syncing, it will stop the sync and re-run it. " +
-            "If force is `false`, the connector will sync only if it isn't currently syncing"
+            "If force is `false`, the connector will sync only if it isn't currently syncing."
     )
     @PluginProperty(dynamic = false)
     @Builder.Default
@@ -67,14 +74,14 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
 
     @Schema(
         title = "Wait for the end of the job.",
-        description = "Allowing to capture job status & logs"
+        description = "Allowing to capture job status & logs."
     )
     @PluginProperty(dynamic = false)
     @Builder.Default
     Boolean wait = true;
 
     @Schema(
-        title = "The max total wait duration"
+        title = "The max total wait duration."
     )
     @PluginProperty(dynamic = false)
     @Builder.Default
