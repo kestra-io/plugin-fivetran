@@ -4,6 +4,7 @@ import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
+import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.models.tasks.VoidOutput;
 import io.kestra.core.runners.RunContext;
@@ -59,33 +60,29 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
     @Schema(
         title = "The connector id to sync."
     )
-    @PluginProperty(dynamic = true)
     @NotNull
-    private String connectorId;
+    private Property<String> connectorId;
 
     @Schema(
         title = "Force with running sync.",
         description = "If `force` is true and the connector is currently syncing, it will stop the sync and re-run it. " +
             "If force is `false`, the connector will sync only if it isn't currently syncing."
     )
-    @PluginProperty(dynamic = false)
     @Builder.Default
-    Boolean force = false;
+    Property<Boolean> force = Property.of(false);
 
     @Schema(
         title = "Wait for the end of the job.",
         description = "Allowing to capture job status & logs."
     )
-    @PluginProperty(dynamic = false)
     @Builder.Default
-    Boolean wait = true;
+    Property<Boolean> wait = Property.of(true);
 
     @Schema(
         title = "The max total wait duration."
     )
-    @PluginProperty(dynamic = false)
     @Builder.Default
-    Duration maxDuration = Duration.ofMinutes(60);
+    Property<Duration> maxDuration = Property.of(Duration.ofMinutes(60));
 
     @Builder.Default
     @Getter(AccessLevel.NONE)
@@ -94,7 +91,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
     @Override
     public VoidOutput run(RunContext runContext) throws Exception {
         Logger logger = runContext.logger();
-        String connectorId = runContext.render(this.connectorId);
+        String connectorId = runContext.render(this.connectorId).as(String.class).orElseThrow();
 
         // previous sync
         Connector previousConnector = fetchConnector(runContext);
@@ -109,7 +106,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
                         .of("/v2/connectors/{connectorId}/sync")
                         .expand(Map.of("connectorId", connectorId))
                 )
-                .body(Map.of("force", this.force)),
+                .body(Map.of("force", runContext.render(this.force).as(Boolean.class).orElseThrow())),
             Argument.of(SyncResponse.class)
         );
 
@@ -117,7 +114,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
 
         logger.info("Job status {} with response: {}", syncHttpResponse.getStatus(), syncResponse);
 
-        if (!this.wait) {
+        if (!runContext.render(this.wait).as(Boolean.class).orElseThrow()) {
             return null;
         }
 
@@ -133,7 +130,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
                 return null;
             }),
             Duration.ofSeconds(1),
-            this.maxDuration
+            runContext.render(this.maxDuration).as(Duration.class).orElseThrow()
         );
 
         if (finalConnector.getFailedAt() != null) {
@@ -151,7 +148,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
                     HttpMethod.GET,
                     UriTemplate
                         .of("/v2/connectors/{connectorId}")
-                        .expand(Map.of("connectorId", runContext.render(this.connectorId)))
+                        .expand(Map.of("connectorId", runContext.render(this.connectorId).as(String.class).orElseThrow()))
                 ),
             Argument.of(ConnectorResponse.class)
         );
