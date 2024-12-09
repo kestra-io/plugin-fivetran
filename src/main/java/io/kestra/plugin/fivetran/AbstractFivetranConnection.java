@@ -2,6 +2,7 @@ package io.kestra.plugin.fivetran;
 
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.models.annotations.PluginProperty;
+import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.Task;
 import io.kestra.core.runners.DefaultRunContext;
 import io.kestra.core.runners.RunContext;
@@ -36,16 +37,14 @@ public abstract class AbstractFivetranConnection extends Task {
     @Schema(
         title = "API key"
     )
-    @PluginProperty(dynamic = true)
     @NotNull
-    String apiKey;
+    Property<String> apiKey;
 
     @Schema(
         title = "API secret"
     )
-    @PluginProperty(dynamic = true)
     @NotNull
-    String apiSecret;
+    Property<String> apiSecret;
 
     private static final NettyHttpClientFactory FACTORY = new NettyHttpClientFactory();
 
@@ -63,7 +62,7 @@ public abstract class AbstractFivetranConnection extends Task {
             request = request
                 .contentType(MediaType.APPLICATION_JSON)
                 .accept("application/json;version=2")
-                .basicAuth(runContext.render(this.apiKey), runContext.render(this.apiSecret));
+                .basicAuth(runContext.render(this.apiKey).as(String.class).orElseThrow(), runContext.render(this.apiSecret).as(String.class).orElseThrow());
 
             try (HttpClient client = this.client(runContext)) {
                 return client.toBlocking().exchange(request, argument);
