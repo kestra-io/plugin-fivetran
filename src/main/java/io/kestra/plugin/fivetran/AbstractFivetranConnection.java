@@ -1,21 +1,17 @@
 package io.kestra.plugin.fivetran;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
-import io.kestra.core.models.annotations.PluginProperty;
+import io.kestra.core.http.HttpRequest;
+import io.kestra.core.http.HttpResponse;
+import io.kestra.core.http.client.HttpClient;
+import io.kestra.core.http.client.HttpClientException;
+import io.kestra.core.http.client.configurations.HttpConfiguration;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.Task;
-import io.kestra.core.runners.DefaultRunContext;
 import io.kestra.core.runners.RunContext;
-import io.micronaut.core.type.Argument;
-import io.micronaut.http.HttpResponse;
-import io.micronaut.http.MediaType;
-import io.micronaut.http.MutableHttpRequest;
-import io.micronaut.http.client.DefaultHttpClientConfiguration;
-import io.micronaut.http.client.HttpClient;
-import io.micronaut.http.client.exceptions.HttpClientResponseException;
-import io.micronaut.http.client.netty.DefaultHttpClient;
-import io.micronaut.http.client.netty.NettyHttpClientFactory;
-import io.micronaut.http.codec.MediaTypeCodecRegistry;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.EqualsAndHashCode;
 import lombok.Getter;
@@ -23,9 +19,8 @@ import lombok.NoArgsConstructor;
 import lombok.ToString;
 import lombok.experimental.SuperBuilder;
 
-import java.net.MalformedURLException;
-import java.net.URI;
-import java.net.URISyntaxException;
+import java.io.IOException;
+
 import jakarta.validation.constraints.NotNull;
 
 @SuperBuilder
@@ -34,47 +29,56 @@ import jakarta.validation.constraints.NotNull;
 @Getter
 @NoArgsConstructor
 public abstract class AbstractFivetranConnection extends Task {
-    @Schema(
-        title = "API key"
-    )
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+        .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+        .registerModule(new JavaTimeModule());
+
+    @Schema(title = "API key")
     @NotNull
     Property<String> apiKey;
 
-    @Schema(
-        title = "API secret"
-    )
+    @Schema(title = "API secret")
     @NotNull
     Property<String> apiSecret;
 
-    private static final NettyHttpClientFactory FACTORY = new NettyHttpClientFactory();
+    @Schema(title = "The base URL of the Fivetran API.")
+    @NotNull
+    Property<String> baseUrl = Property.of("https://api.fivetran.com");
 
-    protected HttpClient client(RunContext runContext) throws IllegalVariableEvaluationException, MalformedURLException, URISyntaxException {
-        MediaTypeCodecRegistry mediaTypeCodecRegistry = ((DefaultRunContext)runContext).getApplicationContext().getBean(MediaTypeCodecRegistry.class);
+    @Schema(title = "The HTTP client configuration.")
+    protected HttpConfiguration options;
 
-        DefaultHttpClient client = (DefaultHttpClient) FACTORY.createClient(URI.create("https://api.fivetran.com").toURL(), new DefaultHttpClientConfiguration());
-        client.setMediaTypeCodecRegistry(mediaTypeCodecRegistry);
+    /**
+     * @param requestBuilder The prepared HTTP request builder.
+     * @param responseType   The expected response type.
+     * @param <RES>          The response class.
+     * @return HttpResponse of type RES.
+     */
+    protected <RES> HttpResponse<RES> request(RunContext runContext, HttpRequest.HttpRequestBuilder requestBuilder, Class<RES> responseType)
+        throws HttpClientException, IllegalVariableEvaluationException {
 
-        return client;
-    }
+        var request = requestBuilder
+            .addHeader("Authorization", "Basic " +
+                runContext.render(this.apiKey).as(String.class).orElseThrow() + ":" +
+                runContext.render(this.apiSecret).as(String.class).orElseThrow()
+            )
+            .addHeader("Content-Type", "application/json")
+            .addHeader("Accept", "application/json;version=2")
+            .build();
 
-    protected <REQ, RES> HttpResponse<RES> request(RunContext runContext, MutableHttpRequest<REQ> request, Argument<RES> argument) throws HttpClientResponseException {
-        try {
-            request = request
-                .contentType(MediaType.APPLICATION_JSON)
-                .accept("application/json;version=2")
-                .basicAuth(runContext.render(this.apiKey).as(String.class).orElseThrow(), runContext.render(this.apiSecret).as(String.class).orElseThrow());
+        try (HttpClient client = new HttpClient(runContext, options)) {
+            HttpResponse<String> response = client.request(request, String.class);
 
-            try (HttpClient client = this.client(runContext)) {
-                return client.toBlocking().exchange(request, argument);
-            }
-        } catch (HttpClientResponseException e) {
-            throw new HttpClientResponseException(
-                "Request failed '" + e.getStatus().getCode() + "' and body '" + e.getResponse().getBody(String.class).orElse("null") + "'",
-                e,
-                e.getResponse()
-            );
-        } catch (IllegalVariableEvaluationException | MalformedURLException | URISyntaxException e) {
-            throw new RuntimeException(e);
+            RES parsedResponse = MAPPER.readValue(response.getBody(), responseType);
+            return HttpResponse.<RES>builder()
+                .request(request)
+                .body(parsedResponse)
+                .headers(response.getHeaders())
+                .status(response.getStatus())
+                .build();
+
+        } catch (IOException e) {
+            throw new RuntimeException("Error executing HTTP request", e);
         }
     }
 }
