@@ -1,9 +1,11 @@
 package io.kestra.plugin.fivetran.connectors;
 
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
+import io.kestra.core.http.HttpRequest;
+import io.kestra.core.http.HttpResponse;
+import io.kestra.core.http.client.HttpClientException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
-import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.models.tasks.VoidOutput;
@@ -13,16 +15,13 @@ import io.kestra.plugin.fivetran.AbstractFivetranConnection;
 import io.kestra.plugin.fivetran.models.Connector;
 import io.kestra.plugin.fivetran.models.ConnectorResponse;
 import io.kestra.plugin.fivetran.models.SyncResponse;
-import io.micronaut.core.type.Argument;
-import io.micronaut.http.HttpMethod;
-import io.micronaut.http.HttpRequest;
-import io.micronaut.http.HttpResponse;
-import io.micronaut.http.uri.UriTemplate;
+
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
 import org.slf4j.Logger;
 
+import java.net.URI;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
@@ -93,24 +92,21 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
         Logger logger = runContext.logger();
         String connectorId = runContext.render(this.connectorId).as(String.class).orElseThrow();
 
-        // previous sync
         Connector previousConnector = fetchConnector(runContext);
 
-        // create sync
-        HttpResponse<SyncResponse> syncHttpResponse = this.request(
-            runContext,
-            HttpRequest
-                .create(
-                    HttpMethod.POST,
-                    UriTemplate
-                        .of("/v2/connectors/{connectorId}/sync")
-                        .expand(Map.of("connectorId", connectorId))
-                )
-                .body(Map.of("force", runContext.render(this.force).as(Boolean.class).orElseThrow())),
-            Argument.of(SyncResponse.class)
-        );
+        HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
+            .uri(URI.create(runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
+                "/v2/connectors/" + connectorId + "/sync"))
+            .method("POST")
+            .body(HttpRequest.JsonRequestBody.builder()
+                .content(Map.of("force", runContext.render(this.force).as(Boolean.class).orElseThrow()))
+                .build());
 
-        SyncResponse syncResponse = syncHttpResponse.getBody().orElseThrow(() -> new IllegalStateException("Missing body on trigger"));
+        HttpResponse<SyncResponse> syncHttpResponse = this.request(runContext, requestBuilder, SyncResponse.class);
+        SyncResponse syncResponse = syncHttpResponse.getBody();
+        if (syncResponse == null) {
+            throw new IllegalStateException("Missing body on trigger");
+        }
 
         logger.info("Job status {} with response: {}", syncHttpResponse.getStatus(), syncResponse);
 
@@ -118,15 +114,13 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
             return null;
         }
 
-        // wait for end
+        // Wait for sync completion
         Connector finalConnector = Await.until(
             throwSupplier(() -> {
                 Connector current = fetchConnector(runContext);
-
                 if (current.completedDate() != null && current.completedDate().compareTo(previousConnector.completedDate()) > 0) {
                     return current;
                 }
-
                 return null;
             }),
             Duration.ofSeconds(1),
@@ -140,19 +134,18 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
         return null;
     }
 
-    private Connector fetchConnector(RunContext runContext) throws IllegalVariableEvaluationException {
-        HttpResponse<ConnectorResponse> fetchConnector = this.request(
-            runContext,
-            HttpRequest
-                .create(
-                    HttpMethod.GET,
-                    UriTemplate
-                        .of("/v2/connectors/{connectorId}")
-                        .expand(Map.of("connectorId", runContext.render(this.connectorId).as(String.class).orElseThrow()))
-                ),
-            Argument.of(ConnectorResponse.class)
-        );
 
-        return fetchConnector.getBody().orElseThrow().getData();
+    private Connector fetchConnector(RunContext runContext) throws IllegalVariableEvaluationException, HttpClientException {
+        String connectorId = runContext.render(this.connectorId).as(String.class).orElseThrow();
+
+        HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
+            .uri(URI.create(runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
+                "/v2/connectors/" + connectorId))
+            .method("GET");
+
+        HttpResponse<ConnectorResponse> fetchConnector = this.request(runContext, requestBuilder, ConnectorResponse.class);
+
+        return fetchConnector.getBody().getData();
     }
+
 }
