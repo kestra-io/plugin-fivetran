@@ -35,7 +35,7 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 @Getter
 @NoArgsConstructor
 @Schema(
-    title = "Run a sync on a connection."
+    title = "Run a sync on a Fivetran connection."
 )
 @Plugin(
     examples = {
