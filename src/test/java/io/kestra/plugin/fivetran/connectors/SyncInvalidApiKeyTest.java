@@ -33,10 +33,10 @@ class SyncInvalidApiKeyTest {
         RunContext runContext = runContextFactory.of(ImmutableMap.of());
 
         Sync task = Sync.builder()
-            .apiKey(Property.of(INVALID_API_KEY))
-            .apiSecret(Property.of(INVALID_API_SECRET))
-            .connectorId(Property.of(INVALID_CONNECTOR_ID))
-            .baseUrl(Property.of(BASE_URL))
+            .apiKey(Property.ofValue(INVALID_API_KEY))
+            .apiSecret(Property.ofValue(INVALID_API_SECRET))
+            .connectorId(Property.ofValue(INVALID_CONNECTOR_ID))
+            .baseUrl(Property.ofValue(BASE_URL))
             .build();
 
         HttpClientResponseException exception = assertThrows(
