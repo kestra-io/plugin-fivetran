@@ -68,20 +68,20 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
             "If force is `false`, the connector will sync only if it isn't currently syncing."
     )
     @Builder.Default
-    Property<Boolean> force = Property.of(false);
+    Property<Boolean> force = Property.ofValue(false);
 
     @Schema(
         title = "Wait for the end of the job.",
         description = "Allowing to capture job status & logs."
     )
     @Builder.Default
-    Property<Boolean> wait = Property.of(true);
+    Property<Boolean> wait = Property.ofValue(true);
 
     @Schema(
         title = "The max total wait duration."
     )
     @Builder.Default
-    Property<Duration> maxDuration = Property.of(Duration.ofMinutes(60));
+    Property<Duration> maxDuration = Property.ofValue(Duration.ofMinutes(60));
 
     @Builder.Default
     @Getter(AccessLevel.NONE)
