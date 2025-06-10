@@ -43,7 +43,7 @@ public abstract class AbstractFivetranConnection extends Task {
 
     @Schema(title = "The base URL of the Fivetran API.")
     @NotNull
-    Property<String> baseUrl = Property.of("https://api.fivetran.com");
+    Property<String> baseUrl = Property.ofValue("https://api.fivetran.com");
 
     @Schema(title = "The HTTP client configuration.")
     protected HttpConfiguration options;
