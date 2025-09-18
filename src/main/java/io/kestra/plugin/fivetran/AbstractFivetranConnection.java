@@ -13,10 +13,7 @@ import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.Task;
 import io.kestra.core.runners.RunContext;
 import io.swagger.v3.oas.annotations.media.Schema;
-import lombok.EqualsAndHashCode;
-import lombok.Getter;
-import lombok.NoArgsConstructor;
-import lombok.ToString;
+import lombok.*;
 import lombok.experimental.SuperBuilder;
 
 import java.io.IOException;
@@ -43,6 +40,7 @@ public abstract class AbstractFivetranConnection extends Task {
 
     @Schema(title = "The base URL of the Fivetran API.")
     @NotNull
+    @Builder.Default
     Property<String> baseUrl = Property.ofValue("https://api.fivetran.com");
 
     @Schema(title = "The HTTP client configuration.")
