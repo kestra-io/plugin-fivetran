@@ -1,8 +1,8 @@
 group: io.kestra.plugin.fivetran.connectors
 name: "connectors"
 title: "Connectors"
-description: "This sub-group of plugins contains tasks for using Fivetran. Fivetran is the automated data movement platform moving data out of, into and across your cloud data platforms."
-body: ""
+description: "Tasks that trigger and manage Fivetran connector syncs."
+body: "Start a connector sync through the Fivetran API and optionally wait for completion or failure, including a force-restart option. Requires API key/secret credentials and a `connectorId`; you can override the API base URL, HTTP options, and tune `force`, `wait`, and `maxDuration` to match your run policies."
 videos: []
 createdBy: "Kestra Core Team"
 managedBy: "Kestra Core Team"

@@ -1,8 +1,8 @@
 group: io.kestra.plugin.fivetran
 name: "fivetran"
 title: "Fivetran"
-description: "Integrate Fivetran connectors for efficient data workflows in Kestra."
-body: ""
+description: "Tasks that orchestrate Fivetran connectors to automate data movement in Kestra workflows."
+body: "Use these tasks to call the Fivetran API from Kestra pipelines, such as triggering connector syncs with built-in waiting and monitoring. Provide your Fivetran API key/secret (typically via secrets), and optionally override the API base URL or HTTP client options."
 videos: []
 createdBy: "Kestra Core Team"
 managedBy: "Kestra Core Team"
