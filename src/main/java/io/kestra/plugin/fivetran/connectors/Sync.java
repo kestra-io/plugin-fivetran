@@ -48,8 +48,8 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
                 tasks:
                   - id: sync
                     type: io.kestra.plugin.fivetran.connectors.Sync
-                    apiKey: "\"{{ secret('FIVETRAN_API_KEY') }}\""
-                    apiSecret: "\"{{ secret('FIVETRAN_API_SECRET') }}\""
+                    apiKey: "{{ secret('FIVETRAN_API_KEY') }}"
+                    apiSecret: "{{ secret('FIVETRAN_API_SECRET') }}"
                     connectorId: "connector_id"
                 """
         )
