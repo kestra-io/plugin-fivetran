@@ -30,20 +30,32 @@ public abstract class AbstractFivetranConnection extends Task {
         .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
         .registerModule(new JavaTimeModule());
 
-    @Schema(title = "API key")
+    @Schema(
+        title = "Fivetran API key",
+        description = "Required; paired with `apiSecret` for HTTP Basic authentication."
+    )
     @NotNull
     Property<String> apiKey;
 
-    @Schema(title = "API secret")
+    @Schema(
+        title = "Fivetran API secret",
+        description = "Required secret token used with `apiKey` for Basic authentication."
+    )
     @NotNull
     Property<String> apiSecret;
 
-    @Schema(title = "The base URL of the Fivetran API.")
+    @Schema(
+        title = "Fivetran API base URL",
+        description = "Base endpoint for all requests. Defaults to `https://api.fivetran.com`; override for regional or private deployments."
+    )
     @NotNull
     @Builder.Default
     Property<String> baseUrl = Property.ofValue("https://api.fivetran.com");
 
-    @Schema(title = "The HTTP client configuration.")
+    @Schema(
+        title = "HTTP client options",
+        description = "Optional Kestra HTTP configuration (timeouts, proxy, retries) applied to Fivetran calls."
+    )
     protected HttpConfiguration options;
 
     /**
