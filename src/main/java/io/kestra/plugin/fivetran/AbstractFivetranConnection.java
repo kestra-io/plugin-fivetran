@@ -17,6 +17,8 @@ import lombok.*;
 import lombok.experimental.SuperBuilder;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 
 import jakarta.validation.constraints.NotNull;
 
@@ -66,12 +68,12 @@ public abstract class AbstractFivetranConnection extends Task {
      */
     protected <RES> HttpResponse<RES> request(RunContext runContext, HttpRequest.HttpRequestBuilder requestBuilder, Class<RES> responseType)
         throws HttpClientException, IllegalVariableEvaluationException {
+        String rawCredentials = runContext.render(this.apiKey).as(String.class).orElseThrow() + ":" +
+            runContext.render(this.apiSecret).as(String.class).orElseThrow();
+        String token = Base64.getEncoder().encodeToString(rawCredentials.getBytes(StandardCharsets.UTF_8));
 
         var request = requestBuilder
-            .addHeader("Authorization", "Basic " +
-                runContext.render(this.apiKey).as(String.class).orElseThrow() + ":" +
-                runContext.render(this.apiSecret).as(String.class).orElseThrow()
-            )
+            .addHeader("Authorization", "Basic " + token)
             .addHeader("Content-Type", "application/json")
             .addHeader("Accept", "application/json;version=2")
             .build();
