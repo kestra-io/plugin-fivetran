@@ -35,7 +35,8 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 @Getter
 @NoArgsConstructor
 @Schema(
-    title = "Run a sync on a Fivetran connection."
+    title = "Trigger and optionally watch connector sync",
+    description = "Starts a Fivetran connector sync through the Fivetran API. Can force-cancel and restart an in-progress sync. Waits for completion by default (up to 60 minutes) and fails if the connector reports a failure."
 )
 @Plugin(
     examples = {
@@ -57,28 +58,29 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 )
 public class Sync extends AbstractFivetranConnection implements RunnableTask<VoidOutput> {
     @Schema(
-        title = "The connector id to sync."
+        title = "Connector ID",
+        description = "Identifier of the Fivetran connector to sync."
     )
     @NotNull
     private Property<String> connectorId;
 
     @Schema(
-        title = "Force with running sync.",
-        description = "If `force` is true and the connector is currently syncing, it will stop the sync and re-run it. " +
-            "If force is `false`, the connector will sync only if it isn't currently syncing."
+        title = "Force restart if already syncing",
+        description = "When true, cancels a running sync before starting a new one. Default is false to skip if a sync is already running."
     )
     @Builder.Default
     Property<Boolean> force = Property.ofValue(false);
 
     @Schema(
-        title = "Wait for the end of the job.",
-        description = "Allowing to capture job status & logs."
+        title = "Wait for sync completion",
+        description = "When true (default), poll the connector until the sync finishes to capture status and logs. Set to false to return immediately after kickoff."
     )
     @Builder.Default
     Property<Boolean> wait = Property.ofValue(true);
 
     @Schema(
-        title = "The max total wait duration."
+        title = "Maximum wait duration",
+        description = "Upper bound for waiting when `wait` is true. Default is 60 minutes."
     )
     @Builder.Default
     Property<Duration> maxDuration = Property.ofValue(Duration.ofMinutes(60));
