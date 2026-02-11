@@ -8,6 +8,7 @@ import io.kestra.core.http.HttpRequest;
 import io.kestra.core.http.HttpResponse;
 import io.kestra.core.http.client.HttpClient;
 import io.kestra.core.http.client.HttpClientException;
+import io.kestra.core.http.client.configurations.BasicAuthConfiguration;
 import io.kestra.core.http.client.configurations.HttpConfiguration;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.Task;
@@ -68,17 +69,19 @@ public abstract class AbstractFivetranConnection extends Task {
      */
     protected <RES> HttpResponse<RES> request(RunContext runContext, HttpRequest.HttpRequestBuilder requestBuilder, Class<RES> responseType)
         throws HttpClientException, IllegalVariableEvaluationException {
-        String rawCredentials = runContext.render(this.apiKey).as(String.class).orElseThrow() + ":" +
-            runContext.render(this.apiSecret).as(String.class).orElseThrow();
-        String token = Base64.getEncoder().encodeToString(rawCredentials.getBytes(StandardCharsets.UTF_8));
 
         var request = requestBuilder
-            .addHeader("Authorization", "Basic " + token)
             .addHeader("Content-Type", "application/json")
             .addHeader("Accept", "application/json;version=2")
             .build();
 
-        try (HttpClient client = new HttpClient(runContext, options)) {
+        HttpConfiguration.HttpConfigurationBuilder builder = this.options != null ? this.options.toBuilder() : HttpConfiguration.builder();
+
+        builder.auth(BasicAuthConfiguration.builder().username(apiKey).password(apiSecret).build());
+
+        HttpConfiguration httpConfiguration = builder.build();
+
+        try (HttpClient client = new HttpClient(runContext, httpConfiguration)) {
             HttpResponse<String> response = client.request(request, String.class);
 
             RES parsedResponse = MAPPER.readValue(response.getBody(), responseType);
