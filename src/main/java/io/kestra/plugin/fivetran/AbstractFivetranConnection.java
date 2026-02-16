@@ -8,6 +8,7 @@ import io.kestra.core.http.HttpRequest;
 import io.kestra.core.http.HttpResponse;
 import io.kestra.core.http.client.HttpClient;
 import io.kestra.core.http.client.HttpClientException;
+import io.kestra.core.http.client.configurations.BasicAuthConfiguration;
 import io.kestra.core.http.client.configurations.HttpConfiguration;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.Task;
@@ -17,6 +18,8 @@ import lombok.*;
 import lombok.experimental.SuperBuilder;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 
 import jakarta.validation.constraints.NotNull;
 
@@ -30,20 +33,32 @@ public abstract class AbstractFivetranConnection extends Task {
         .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
         .registerModule(new JavaTimeModule());
 
-    @Schema(title = "API key")
+    @Schema(
+        title = "Fivetran API key",
+        description = "Required; paired with `apiSecret` for HTTP Basic authentication."
+    )
     @NotNull
     Property<String> apiKey;
 
-    @Schema(title = "API secret")
+    @Schema(
+        title = "Fivetran API secret",
+        description = "Required secret token used with `apiKey` for Basic authentication."
+    )
     @NotNull
     Property<String> apiSecret;
 
-    @Schema(title = "The base URL of the Fivetran API.")
+    @Schema(
+        title = "Fivetran API base URL",
+        description = "Base endpoint for all requests. Defaults to `https://api.fivetran.com`; override for regional or private deployments."
+    )
     @NotNull
     @Builder.Default
     Property<String> baseUrl = Property.ofValue("https://api.fivetran.com");
 
-    @Schema(title = "The HTTP client configuration.")
+    @Schema(
+        title = "HTTP client options",
+        description = "Optional Kestra HTTP configuration (timeouts, proxy, retries) applied to Fivetran calls."
+    )
     protected HttpConfiguration options;
 
     /**
@@ -56,15 +71,17 @@ public abstract class AbstractFivetranConnection extends Task {
         throws HttpClientException, IllegalVariableEvaluationException {
 
         var request = requestBuilder
-            .addHeader("Authorization", "Basic " +
-                runContext.render(this.apiKey).as(String.class).orElseThrow() + ":" +
-                runContext.render(this.apiSecret).as(String.class).orElseThrow()
-            )
             .addHeader("Content-Type", "application/json")
             .addHeader("Accept", "application/json;version=2")
             .build();
 
-        try (HttpClient client = new HttpClient(runContext, options)) {
+        HttpConfiguration.HttpConfigurationBuilder builder = this.options != null ? this.options.toBuilder() : HttpConfiguration.builder();
+
+        builder.auth(BasicAuthConfiguration.builder().username(apiKey).password(apiSecret).build());
+
+        HttpConfiguration httpConfiguration = builder.build();
+
+        try (HttpClient client = new HttpClient(runContext, httpConfiguration)) {
             HttpResponse<String> response = client.request(request, String.class);
 
             RES parsedResponse = MAPPER.readValue(response.getBody(), responseType);
