@@ -1,8 +1,11 @@
 package io.kestra.plugin.fivetran;
 
+import java.io.IOException;
+
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.http.HttpRequest;
 import io.kestra.core.http.HttpResponse;
@@ -13,15 +16,11 @@ import io.kestra.core.http.client.configurations.HttpConfiguration;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.Task;
 import io.kestra.core.runners.RunContext;
+
 import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.NotNull;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
-
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
-
-import jakarta.validation.constraints.NotNull;
 
 @SuperBuilder
 @ToString
@@ -63,8 +62,8 @@ public abstract class AbstractFivetranConnection extends Task {
 
     /**
      * @param requestBuilder The prepared HTTP request builder.
-     * @param responseType   The expected response type.
-     * @param <RES>          The response class.
+     * @param responseType The expected response type.
+     * @param <RES> The response class.
      * @return HttpResponse of type RES.
      */
     protected <RES> HttpResponse<RES> request(RunContext runContext, HttpRequest.HttpRequestBuilder requestBuilder, Class<RES> responseType)
@@ -85,7 +84,7 @@ public abstract class AbstractFivetranConnection extends Task {
             HttpResponse<String> response = client.request(request, String.class);
 
             RES parsedResponse = MAPPER.readValue(response.getBody(), responseType);
-            return HttpResponse.<RES>builder()
+            return HttpResponse.<RES> builder()
                 .request(request)
                 .body(parsedResponse)
                 .headers(response.getHeaders())

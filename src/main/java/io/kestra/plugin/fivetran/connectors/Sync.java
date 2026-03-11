@@ -1,5 +1,12 @@
 package io.kestra.plugin.fivetran.connectors;
 
+import java.net.URI;
+import java.time.Duration;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.slf4j.Logger;
+
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.http.HttpRequest;
 import io.kestra.core.http.HttpResponse;
@@ -17,15 +24,9 @@ import io.kestra.plugin.fivetran.models.ConnectorResponse;
 import io.kestra.plugin.fivetran.models.SyncResponse;
 
 import io.swagger.v3.oas.annotations.media.Schema;
+import jakarta.validation.constraints.NotNull;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
-import org.slf4j.Logger;
-
-import java.net.URI;
-import java.time.Duration;
-import java.util.HashMap;
-import java.util.Map;
-import jakarta.validation.constraints.NotNull;
 
 import static io.kestra.core.utils.Rethrow.throwSupplier;
 
@@ -97,12 +98,18 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
         Connector previousConnector = fetchConnector(runContext);
 
         HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
-            .uri(URI.create(runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
-                "/v2/connectors/" + connectorId + "/sync"))
+            .uri(
+                URI.create(
+                    runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
+                        "/v2/connectors/" + connectorId + "/sync"
+                )
+            )
             .method("POST")
-            .body(HttpRequest.JsonRequestBody.builder()
-                .content(Map.of("force", runContext.render(this.force).as(Boolean.class).orElseThrow()))
-                .build());
+            .body(
+                HttpRequest.JsonRequestBody.builder()
+                    .content(Map.of("force", runContext.render(this.force).as(Boolean.class).orElseThrow()))
+                    .build()
+            );
 
         HttpResponse<SyncResponse> syncHttpResponse = this.request(runContext, requestBuilder, SyncResponse.class);
         SyncResponse syncResponse = syncHttpResponse.getBody();
@@ -118,7 +125,8 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
 
         // Wait for sync completion
         Connector finalConnector = Await.until(
-            throwSupplier(() -> {
+            throwSupplier(() ->
+            {
                 Connector current = fetchConnector(runContext);
                 if (current.completedDate() != null && current.completedDate().compareTo(previousConnector.completedDate()) > 0) {
                     return current;
@@ -136,13 +144,16 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
         return null;
     }
 
-
     private Connector fetchConnector(RunContext runContext) throws IllegalVariableEvaluationException, HttpClientException {
         String connectorId = runContext.render(this.connectorId).as(String.class).orElseThrow();
 
         HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
-            .uri(URI.create(runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
-                "/v2/connectors/" + connectorId))
+            .uri(
+                URI.create(
+                    runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
+                        "/v2/connectors/" + connectorId
+                )
+            )
             .method("GET");
 
         HttpResponse<ConnectorResponse> fetchConnector = this.request(runContext, requestBuilder, ConnectorResponse.class);

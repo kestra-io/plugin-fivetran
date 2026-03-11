@@ -1,18 +1,19 @@
 package io.kestra.plugin.fivetran.models;
 
-import com.fasterxml.jackson.annotation.JsonAnyGetter;
-import com.fasterxml.jackson.annotation.JsonAnySetter;
-import com.fasterxml.jackson.annotation.JsonProperty;
-import lombok.Builder;
-import lombok.Value;
-import lombok.experimental.SuperBuilder;
-import lombok.extern.jackson.Jacksonized;
-
 import java.time.ZonedDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import com.fasterxml.jackson.annotation.JsonAnyGetter;
+import com.fasterxml.jackson.annotation.JsonAnySetter;
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import jakarta.validation.Valid;
+import lombok.Builder;
+import lombok.Value;
+import lombok.experimental.SuperBuilder;
+import lombok.extern.jackson.Jacksonized;
 
 @Value
 @Jacksonized
@@ -74,21 +75,17 @@ public class Connector {
     Map<String, Object> properties = new HashMap<>();
 
     @JsonAnyGetter
-    public Map<String, Object> getProperties(){
+    public Map<String, Object> getProperties() {
         return properties != null ? properties : new HashMap<>();
     }
 
     @JsonAnySetter
-    public void addProperties(String property, Object value){
+    public void addProperties(String property, Object value) {
         properties.put(property, value);
     }
 
     public ZonedDateTime completedDate() {
-        return this.getSucceededAt() != null && (
-            this.getFailedAt() == null ||
-            this.getSucceededAt().compareTo(this.getFailedAt()) > 0
-        ) ?
-            this.getSucceededAt() :
-            this.getFailedAt();
+        return this.getSucceededAt() != null && (this.getFailedAt() == null ||
+            this.getSucceededAt().compareTo(this.getFailedAt()) > 0) ? this.getSucceededAt() : this.getFailedAt();
     }
 }
