@@ -21,6 +21,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotNull;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
+import io.kestra.core.models.annotations.PluginProperty;
 
 @SuperBuilder
 @ToString
@@ -58,6 +59,7 @@ public abstract class AbstractFivetranConnection extends Task {
         title = "HTTP client options",
         description = "Optional Kestra HTTP configuration (timeouts, proxy, retries) applied to Fivetran calls."
     )
+    @PluginProperty(group = "advanced")
     protected HttpConfiguration options;
 
     /**
