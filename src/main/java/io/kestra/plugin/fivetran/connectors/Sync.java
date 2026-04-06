@@ -29,6 +29,7 @@ import lombok.*;
 import lombok.experimental.SuperBuilder;
 
 import static io.kestra.core.utils.Rethrow.throwSupplier;
+import io.kestra.core.models.annotations.PluginProperty;
 
 @SuperBuilder
 @ToString
@@ -63,6 +64,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
         description = "Identifier of the Fivetran connector to sync."
     )
     @NotNull
+    @PluginProperty(group = "main")
     private Property<String> connectorId;
 
     @Schema(
