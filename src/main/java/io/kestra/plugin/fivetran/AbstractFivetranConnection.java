@@ -38,6 +38,7 @@ public abstract class AbstractFivetranConnection extends Task {
         description = "Required; paired with `apiSecret` for HTTP Basic authentication."
     )
     @NotNull
+    @PluginProperty(secret = true)
     Property<String> apiKey;
 
     @Schema(
@@ -45,6 +46,7 @@ public abstract class AbstractFivetranConnection extends Task {
         description = "Required secret token used with `apiKey` for Basic authentication."
     )
     @NotNull
+    @PluginProperty(secret = true)
     Property<String> apiSecret;
 
     @Schema(
