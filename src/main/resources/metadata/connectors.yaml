@@ -1,6 +1,6 @@
 group: io.kestra.plugin.fivetran.connectors
 name: "connectors"
-title: "Connectors"
+title: "Fivetran Connectors"
 description: "Tasks that trigger and manage Fivetran connector syncs."
 body: "Start a connector sync through the Fivetran API and optionally wait for completion or failure, including a force-restart option. Requires API key/secret credentials and a `connectorId`; you can override the API base URL, HTTP options, and tune `force`, `wait`, and `maxDuration` to match your run policies."
 videos: []
