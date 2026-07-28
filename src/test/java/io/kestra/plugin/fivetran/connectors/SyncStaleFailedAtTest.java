@@ -3,7 +3,6 @@ package io.kestra.plugin.fivetran.connectors;
 import java.time.Duration;
 
 import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
@@ -27,19 +26,13 @@ import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/**
- * End-to-end regression test for <a href="https://github.com/kestra-io/plugin-fivetran/issues/89">#89</a>:
- * Fivetran never clears {@code failed_at} after a later success, so it must only fail the sync when
- * {@code failed_at} is the most recent of the two completion markers, not merely when it is non-null.
- */
 @KestraTest
-@Tag("unit")
 class SyncStaleFailedAtTest {
     private static final String CONNECTOR_ID = "arriving_atone";
     private static final String SYNC_SCENARIO = "connector-sync";
 
     @RegisterExtension
-    WireMockExtension wireMock = WireMockExtension.newInstance().build();
+    static WireMockExtension wireMock = WireMockExtension.newInstance().build();
 
     @Inject
     private RunContextFactory runContextFactory;
