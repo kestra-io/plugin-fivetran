@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
 import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
+import com.github.tomakehurst.wiremock.junit5.WireMockTest;
 import com.github.tomakehurst.wiremock.stubbing.Scenario;
 import com.google.common.collect.ImmutableMap;
 
@@ -27,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @KestraTest
+@WireMockTest(httpPort = 28182)
 class SyncStaleFailedAtTest {
     private static final String CONNECTOR_ID = "arriving_atone";
     private static final String SYNC_SCENARIO = "connector-sync";
