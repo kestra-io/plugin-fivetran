@@ -88,4 +88,10 @@ public class Connector {
         return this.getSucceededAt() != null && (this.getFailedAt() == null ||
             this.getSucceededAt().compareTo(this.getFailedAt()) > 0) ? this.getSucceededAt() : this.getFailedAt();
     }
+
+    // Fivetran never clears failed_at after a later success, so a non-null failed_at alone doesn't mean the
+    // last sync failed: only treat it as a failure when it is the most recent of the two completion markers.
+    public boolean hasFailed() {
+        return this.getFailedAt() != null && this.getFailedAt().equals(this.completedDate());
+    }
 }

@@ -13,6 +13,7 @@ import io.kestra.core.http.HttpResponse;
 import io.kestra.core.http.client.HttpClientException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
+import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.models.tasks.VoidOutput;
@@ -29,7 +30,6 @@ import lombok.*;
 import lombok.experimental.SuperBuilder;
 
 import static io.kestra.core.utils.Rethrow.throwSupplier;
-import io.kestra.core.models.annotations.PluginProperty;
 
 @SuperBuilder
 @ToString
@@ -139,7 +139,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
             runContext.render(this.maxDuration).as(Duration.class).orElseThrow()
         );
 
-        if (finalConnector.getFailedAt() != null) {
+        if (finalConnector.hasFailed()) {
             throw new Exception("Connector '" + connectorId + "' failed: " + finalConnector);
         }
 
