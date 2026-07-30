@@ -4,9 +4,8 @@ import java.time.Duration;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.extension.RegisterExtension;
 
-import com.github.tomakehurst.wiremock.junit5.WireMockExtension;
+import com.github.tomakehurst.wiremock.junit5.WireMockRuntimeInfo;
 import com.github.tomakehurst.wiremock.junit5.WireMockTest;
 import com.github.tomakehurst.wiremock.stubbing.Scenario;
 import com.google.common.collect.ImmutableMap;
@@ -21,6 +20,7 @@ import jakarta.inject.Inject;
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
+import static com.github.tomakehurst.wiremock.client.WireMock.stubFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
@@ -28,22 +28,19 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @KestraTest
-@WireMockTest(httpPort = 28182)
+@WireMockTest
 class SyncStaleFailedAtTest {
     private static final String CONNECTOR_ID = "arriving_atone";
     private static final String SYNC_SCENARIO = "connector-sync";
-
-    @RegisterExtension
-    static WireMockExtension wireMock = WireMockExtension.newInstance().build();
 
     @Inject
     private RunContextFactory runContextFactory;
 
     @Test
     @DisplayName("Should not fail a sync whose succeeded_at is more recent than a stale failed_at")
-    void staleFailedAtDoesNotFailASucceededSync() throws Exception {
+    void staleFailedAtDoesNotFailASucceededSync(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         // previousConnector fetch: no succeeded_at yet, only a stale failure from months ago.
-        wireMock.stubFor(
+        stubFor(
             get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID))
                 .inScenario(SYNC_SCENARIO)
                 .whenScenarioStateIs(Scenario.STARTED)
@@ -53,7 +50,7 @@ class SyncStaleFailedAtTest {
                 )
         );
 
-        wireMock.stubFor(
+        stubFor(
             post(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync"))
                 .inScenario(SYNC_SCENARIO)
                 .whenScenarioStateIs(Scenario.STARTED)
@@ -65,7 +62,7 @@ class SyncStaleFailedAtTest {
         );
 
         // Post-sync fetch: this run succeeded in July, the April failure is stale and must be ignored.
-        wireMock.stubFor(
+        stubFor(
             get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID))
                 .inScenario(SYNC_SCENARIO)
                 .whenScenarioStateIs("SYNCED")
@@ -75,13 +72,13 @@ class SyncStaleFailedAtTest {
                 )
         );
 
-        assertDoesNotThrow(() -> syncTask().run(runContext()));
+        assertDoesNotThrow(() -> syncTask(wmRuntimeInfo.getHttpBaseUrl()).run(runContext()));
     }
 
     @Test
     @DisplayName("Should fail a sync whose failed_at is more recent than succeeded_at")
-    void mostRecentFailureFailsTheSync() {
-        wireMock.stubFor(
+    void mostRecentFailureFailsTheSync(WireMockRuntimeInfo wmRuntimeInfo) {
+        stubFor(
             get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID))
                 .inScenario(SYNC_SCENARIO)
                 .whenScenarioStateIs(Scenario.STARTED)
@@ -91,7 +88,7 @@ class SyncStaleFailedAtTest {
                 )
         );
 
-        wireMock.stubFor(
+        stubFor(
             post(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync"))
                 .inScenario(SYNC_SCENARIO)
                 .whenScenarioStateIs(Scenario.STARTED)
@@ -103,7 +100,7 @@ class SyncStaleFailedAtTest {
         );
 
         // Post-sync fetch: the July failure happened after the April success, so this run genuinely failed.
-        wireMock.stubFor(
+        stubFor(
             get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID))
                 .inScenario(SYNC_SCENARIO)
                 .whenScenarioStateIs("SYNCED")
@@ -113,16 +110,16 @@ class SyncStaleFailedAtTest {
                 )
         );
 
-        Exception exception = assertThrows(Exception.class, () -> syncTask().run(runContext()));
+        Exception exception = assertThrows(Exception.class, () -> syncTask(wmRuntimeInfo.getHttpBaseUrl()).run(runContext()));
         assertThat(exception.getMessage(), containsString("Connector '" + CONNECTOR_ID + "' failed"));
     }
 
-    private Sync syncTask() {
+    private Sync syncTask(String baseUrl) {
         return Sync.builder()
             .apiKey(Property.ofValue("dummy-api-key"))
             .apiSecret(Property.ofValue("dummy-api-secret"))
             .connectorId(Property.ofValue(CONNECTOR_ID))
-            .baseUrl(Property.ofValue(wireMock.baseUrl()))
+            .baseUrl(Property.ofValue(baseUrl))
             .maxDuration(Property.ofValue(Duration.ofSeconds(5)))
             .build();
     }

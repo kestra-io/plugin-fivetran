@@ -2,6 +2,7 @@ package io.kestra.plugin.fivetran.connectors;
 
 import java.net.URI;
 import java.time.Duration;
+import java.time.ZonedDateTime;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -125,12 +126,17 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
             return null;
         }
 
-        // Wait for sync completion
+        // Wait for sync completion. previousCompletedDate is null for a connector that has never run,
+        // so guard against it instead of calling compareTo on null.
+        ZonedDateTime previousCompletedDate = previousConnector.completedDate();
         Connector finalConnector = Await.until(
             throwSupplier(() ->
             {
                 Connector current = fetchConnector(runContext);
-                if (current.completedDate() != null && current.completedDate().compareTo(previousConnector.completedDate()) > 0) {
+                if (
+                    current.completedDate() != null
+                        && (previousCompletedDate == null || current.completedDate().isAfter(previousCompletedDate))
+                ) {
                     return current;
                 }
                 return null;
