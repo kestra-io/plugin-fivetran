@@ -2,6 +2,7 @@ package io.kestra.plugin.fivetran.connectors;
 
 import java.net.URI;
 import java.time.Duration;
+import java.time.ZonedDateTime;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -13,6 +14,7 @@ import io.kestra.core.http.HttpResponse;
 import io.kestra.core.http.client.HttpClientException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
+import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.models.tasks.VoidOutput;
@@ -29,7 +31,6 @@ import lombok.*;
 import lombok.experimental.SuperBuilder;
 
 import static io.kestra.core.utils.Rethrow.throwSupplier;
-import io.kestra.core.models.annotations.PluginProperty;
 
 @SuperBuilder
 @ToString
@@ -125,12 +126,17 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
             return null;
         }
 
-        // Wait for sync completion
+        // Wait for sync completion. previousCompletedDate is null for a connector that has never run,
+        // so guard against it instead of calling compareTo on null.
+        ZonedDateTime previousCompletedDate = previousConnector.completedDate();
         Connector finalConnector = Await.until(
             throwSupplier(() ->
             {
                 Connector current = fetchConnector(runContext);
-                if (current.completedDate() != null && current.completedDate().compareTo(previousConnector.completedDate()) > 0) {
+                if (
+                    current.completedDate() != null
+                        && (previousCompletedDate == null || current.completedDate().isAfter(previousCompletedDate))
+                ) {
                     return current;
                 }
                 return null;
@@ -139,7 +145,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
             runContext.render(this.maxDuration).as(Duration.class).orElseThrow()
         );
 
-        if (finalConnector.getFailedAt() != null) {
+        if (finalConnector.hasFailed()) {
             throw new Exception("Connector '" + connectorId + "' failed: " + finalConnector);
         }
 
