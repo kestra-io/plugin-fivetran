@@ -8,4 +8,6 @@ Set `apiKey` and `apiSecret` (both required) for HTTP Basic authentication again
 
 ## Tasks
 
-`connectors.Sync` triggers a sync for a `connectorId` (required) and waits for completion by default (`wait: true`). Set `force: true` to cancel any active sync before starting a new one — by default a running sync is left as-is and the task skips. Cap wait time with `maxDuration` (default 60 minutes).
+`connectors.Sync` triggers a sync for a `connectorId` (required) and waits for completion by default (`wait: true`). Set `force: true` to cancel any active sync before starting a new one. By default a running sync is left as-is and the task skips. Cap wait time with `maxDuration` (default 60 minutes).
+
+While waiting, the connector status is polled every `pollFrequency` (default 5 seconds). Transient errors during polling (429 and 5xx) are retried and do not fail the task, since the sync keeps running on Fivetran regardless. `maxAttempts` (default 3, total attempts including the first) and `initialRetryDelay` (default 1s) tune the per-request retry. The sync trigger itself is never retried, so it cannot fire twice.
