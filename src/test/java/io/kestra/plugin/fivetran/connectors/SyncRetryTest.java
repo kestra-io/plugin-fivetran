@@ -468,6 +468,73 @@ class SyncRetryTest {
     }
 
     @Test
+    @DisplayName("A persistent transport failure exhausts the retry and surfaces the real cause, not RetryFailed")
+    void transportFailureExhaustsRetryAndSurfacesRealCause() {
+        // Port 1 is never bound, so every attempt gets a connection-refused (a ConnectException, classified
+        // transient and retried). After the retry is exhausted, request()'s failureFunction must surface the
+        // real HttpClientException with the connection-refused cause, not leak RetryUtils' RetryFailed.
+        Sync task = Sync.builder()
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .connectorId(Property.ofValue(CONNECTOR_ID))
+            .baseUrl(Property.ofValue("http://127.0.0.1:1"))
+            .maxDuration(Property.ofValue(Duration.ofSeconds(5)))
+            .maxAttempts(Property.ofValue(3))
+            .initialRetryDelay(Property.ofValue(Duration.ofMillis(20)))
+            .build();
+
+        HttpClientRequestException thrown = assertThrows(HttpClientRequestException.class, () -> task.run(runContext()));
+        assertTrue(thrown.getMessage().contains("Connection refused"), "message was: " + thrown.getMessage());
+    }
+
+    @Test
+    @DisplayName("Should reject maxAttempts below 1 with a clear message instead of an opaque Failsafe error")
+    void maxAttemptsBelowOneIsRejected(WireMockRuntimeInfo wmRuntimeInfo) {
+        Sync task = Sync.builder()
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .connectorId(Property.ofValue(CONNECTOR_ID))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .maxAttempts(Property.ofValue(0))
+            .build();
+
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class, () -> task.run(runContext()));
+        assertTrue(thrown.getMessage().contains("maxAttempts must be at least 1"), "message was: " + thrown.getMessage());
+    }
+
+    @Test
+    @DisplayName("Should reject a non-positive pollFrequency before triggering the sync")
+    void pollFrequencyNotPositiveIsRejected(WireMockRuntimeInfo wmRuntimeInfo) {
+        Sync task = Sync.builder()
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .connectorId(Property.ofValue(CONNECTOR_ID))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .pollFrequency(Property.ofValue(Duration.ZERO))
+            .build();
+
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class, () -> task.run(runContext()));
+        assertTrue(thrown.getMessage().contains("pollFrequency must be a positive duration"), "message was: " + thrown.getMessage());
+        // Rejected before any HTTP call, so the sync trigger never fired.
+        verify(exactly(0), postRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync")));
+    }
+
+    @Test
+    @DisplayName("Should reject a non-positive initialRetryDelay")
+    void initialRetryDelayNotPositiveIsRejected(WireMockRuntimeInfo wmRuntimeInfo) {
+        Sync task = Sync.builder()
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .connectorId(Property.ofValue(CONNECTOR_ID))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .initialRetryDelay(Property.ofValue(Duration.ZERO))
+            .build();
+
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class, () -> task.run(runContext()));
+        assertTrue(thrown.getMessage().contains("initialRetryDelay must be a positive duration"), "message was: " + thrown.getMessage());
+    }
+
+    @Test
     @DisplayName("A read timeout or refused connection is transient; a bad host or parse error is not")
     void transientReadFailureClassification() {
         assertTrue(Sync.isTransientReadFailure(new RuntimeException("wrapped", new SocketTimeoutException("read timed out"))));

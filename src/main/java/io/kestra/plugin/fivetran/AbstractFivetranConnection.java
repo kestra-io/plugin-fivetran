@@ -118,6 +118,11 @@ public abstract class AbstractFivetranConnection extends Task {
         HttpConfiguration httpConfiguration = builder.build();
 
         var rMaxAttempts = runContext.render(this.maxAttempts).as(Integer.class).orElseThrow();
+        // @Min(1) only catches static values at flow-validation time; a dynamic expression can still
+        // render to 0 or negative, which Failsafe rejects with an opaque error naming no property.
+        if (rMaxAttempts < 1) {
+            throw new IllegalArgumentException("maxAttempts must be at least 1, but was " + rMaxAttempts);
+        }
         Duration rInitialRetryDelay = runContext.render(this.initialRetryDelay).as(Duration.class).orElseThrow();
         if (rInitialRetryDelay.isNegative() || rInitialRetryDelay.isZero()) {
             throw new IllegalArgumentException("initialRetryDelay must be a positive duration, but was " + rInitialRetryDelay);

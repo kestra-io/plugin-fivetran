@@ -96,6 +96,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
         description = "Interval between connector status checks while waiting for the sync to complete. Default is 5 seconds."
     )
     @Builder.Default
+    @PluginProperty(group = "advanced")
     Property<Duration> pollFrequency = Property.ofValue(Duration.ofSeconds(5));
 
     @Builder.Default
