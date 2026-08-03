@@ -5,6 +5,8 @@ import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.slf4j.Logger;
 
@@ -89,6 +91,14 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
     @Builder.Default
     Property<Duration> maxDuration = Property.ofValue(Duration.ofMinutes(60));
 
+    @Schema(
+        title = "Poll frequency",
+        description = "Interval between connector status checks while waiting for the sync to complete. Default is 5 seconds."
+    )
+    @Builder.Default
+    @PluginProperty(group = "advanced")
+    Property<Duration> pollFrequency = Property.ofValue(Duration.ofSeconds(5));
+
     @Builder.Default
     @Getter(AccessLevel.NONE)
     private transient Map<Integer, Integer> loggedLine = new HashMap<>();
@@ -97,6 +107,11 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
     public VoidOutput run(RunContext runContext) throws Exception {
         Logger logger = runContext.logger();
         String connectorId = runContext.render(this.connectorId).as(String.class).orElseThrow();
+
+        Duration rPollFrequency = runContext.render(this.pollFrequency).as(Duration.class).orElseThrow();
+        if (rPollFrequency.isNegative() || rPollFrequency.isZero()) {
+            throw new IllegalArgumentException("pollFrequency must be a positive duration, but was " + rPollFrequency);
+        }
 
         Connector previousConnector = fetchConnector(runContext);
 
@@ -126,30 +141,64 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
             return null;
         }
 
-        // Wait for sync completion. previousCompletedDate is null for a connector that has never run,
-        // so guard against it instead of calling compareTo on null.
         ZonedDateTime previousCompletedDate = previousConnector.completedDate();
-        Connector finalConnector = Await.until(
-            throwSupplier(() ->
-            {
-                Connector current = fetchConnector(runContext);
-                if (
-                    current.completedDate() != null
-                        && (previousCompletedDate == null || current.completedDate().isAfter(previousCompletedDate))
-                ) {
-                    return current;
-                }
-                return null;
-            }),
-            Duration.ofSeconds(1),
-            runContext.render(this.maxDuration).as(Duration.class).orElseThrow()
-        );
+        Duration rMaxDuration = runContext.render(this.maxDuration).as(Duration.class).orElseThrow();
+        AtomicReference<Exception> lastTransientError = new AtomicReference<>();
+        Connector finalConnector;
+        try {
+            finalConnector = Await.until(
+                throwSupplier(() ->
+                {
+                    Connector current;
+                    try {
+                        current = fetchConnector(runContext);
+                    } catch (Exception e) {
+                        // A transient read failure is not a sync failure, so keep polling; see isTransientReadFailure.
+                        if (isTransientReadFailure(e)) {
+                            lastTransientError.set(e);
+                            logger.warn("Could not read connector '{}' status, retrying on next poll: {}", connectorId, e.getMessage());
+                            return null;
+                        }
+                        throw e;
+                    }
+
+                    if (
+                        current.completedDate() != null
+                            && (previousCompletedDate == null || current.completedDate().isAfter(previousCompletedDate))
+                    ) {
+                        return current;
+                    }
+                    return null;
+                }),
+                rPollFrequency,
+                rMaxDuration
+            );
+        } catch (TimeoutException e) {
+            // If polling only ever saw transient errors, name the last one so the failure is diagnosable
+            // instead of surfacing Await's generic "failed to terminate" message with no cause.
+            Exception last = lastTransientError.get();
+            if (last == null) {
+                throw e;
+            }
+            throw new TimeoutException(
+                "Connector '" + connectorId + "' did not complete within " + rMaxDuration
+                    + ", last error while polling: " + last.getMessage()
+            );
+        }
 
         if (finalConnector.hasFailed()) {
             throw new Exception("Connector '" + connectorId + "' failed: " + finalConnector);
         }
 
         return null;
+    }
+
+    /**
+     * Whether a failed status read is transient and polling should continue. The sync keeps running
+     * on Fivetran regardless, so a transient read failure is not a sync failure; other errors fail fast.
+     */
+    static boolean isTransientReadFailure(Throwable e) {
+        return isRetriableTransientError(e, "GET");
     }
 
     private Connector fetchConnector(RunContext runContext) throws IllegalVariableEvaluationException, HttpClientException {
