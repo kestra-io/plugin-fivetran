@@ -46,7 +46,7 @@
 ## What
 
 - Provides plugin components under `io.kestra.plugin.fivetran`.
-- Includes classes such as `Sync`, `SyncResponse`, `ConnectorStatusResponse`, `ConnectorResponse`.
+- Includes classes such as `Sync`, `Status`, `SyncResponse`, `ConnectorStatusResponse`, `ConnectorResponse`.
 
 ## Documentation
 * Full documentation can be found under [kestra.io/docs](https://kestra.io/docs)
