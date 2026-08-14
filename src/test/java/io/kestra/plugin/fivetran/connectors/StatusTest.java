@@ -32,6 +32,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.exactly;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.moreThan;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.stubFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
@@ -828,6 +829,108 @@ class StatusTest {
         TimeoutException thrown = assertThrows(TimeoutException.class, () -> task.run(runContext()));
         assertThat(thrown.getMessage(), containsString(connectorId));
         assertThat(thrown.getMessage(), containsString("did not become fresh"));
+    }
+
+    @Test
+    @DisplayName("Should succeed with a normal output when the asset emitter is unavailable (OSS edition)")
+    void succeedsWithNormalOutputWhenAssetEmitterThrowsUnsupportedOperationException(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        String connectorId = "oss_asset_connector";
+        String schema = "oss_asset_connector_schema";
+
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + connectorId))
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody(connectorId, isoNow(-10), null, false, "connected", 360, schema))
+                )
+        );
+
+        // Mirrors AssetManagerFactory#of(boolean)'s real OSS default, where emit() throws because the
+        // EE emitter isn't available.
+        assetManagerFactory.throwUnsupportedOperationOnEmit(true);
+
+        Status task = Status.builder()
+            .id("status")
+            .type(Status.class.getName())
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .connectorIds(Property.ofValue(List.of(connectorId)))
+            .wait(Property.ofValue(false))
+            .assets(new AssetsDeclaration(true, List.of(), List.of()))
+            .build();
+
+        Status.Output output = assertDoesNotThrow(() -> task.run(runContextFactory.of(task, Map.of())));
+
+        assertThat(output.getConnectors(), aMapWithSize(1));
+        assertThat(output.getConnectors().get(connectorId).getFresh(), is(true));
+        assertThat(assetManagerFactory.allEmitted(), is(empty()));
+    }
+
+    @Test
+    @DisplayName("Should wait for the slowest connector when multiple connectors become fresh at different times")
+    void waitsForTheSlowestConnectorAmongMultiple(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        String connectorIdA = "staggered_connector_a";
+        String connectorIdB = "staggered_connector_b";
+        String scenario = "status-staggered-multi-connector";
+
+        // A is fresh from the very first poll.
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + connectorIdA))
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody(connectorIdA, isoNow(-5), null, false, "connected", 360, null))
+                )
+        );
+
+        // B stays stale for the first two poll cycles and only becomes fresh on the third.
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + connectorIdB))
+                .inScenario(scenario)
+                .whenScenarioStateIs(Scenario.STARTED)
+                .willSetStateTo("STALE_ONCE_MORE")
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody(connectorIdB, isoNow(-600), null, false, "connected", 360, null))
+                )
+        );
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + connectorIdB))
+                .inScenario(scenario)
+                .whenScenarioStateIs("STALE_ONCE_MORE")
+                .willSetStateTo("FRESH")
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody(connectorIdB, isoNow(-600), null, false, "connected", 360, null))
+                )
+        );
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + connectorIdB))
+                .inScenario(scenario)
+                .whenScenarioStateIs("FRESH")
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody(connectorIdB, isoNow(-5), null, false, "connected", 360, null))
+                )
+        );
+
+        Status task = Status.builder()
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .connectorIds(Property.ofValue(List.of(connectorIdA, connectorIdB)))
+            .pollFrequency(Property.ofValue(Duration.ofMillis(200)))
+            .maxDuration(Property.ofValue(Duration.ofSeconds(10)))
+            .build();
+
+        Status.Output output = task.run(runContext());
+
+        assertThat(output.getConnectors(), aMapWithSize(2));
+        assertThat(output.getConnectors().get(connectorIdA).getFresh(), is(true));
+        assertThat(output.getConnectors().get(connectorIdB).getFresh(), is(true));
+
+        // B was stale on the first two polls, so it must have been polled more than once before succeeding.
+        verify(moreThan(1), getRequestedFor(urlEqualTo("/v2/connectors/" + connectorIdB)));
     }
 
     @Test
