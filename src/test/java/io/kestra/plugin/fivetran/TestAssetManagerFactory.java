@@ -15,9 +15,13 @@ import jakarta.inject.Singleton;
 @Replaces(AssetManagerFactory.class)
 public class TestAssetManagerFactory extends AssetManagerFactory {
     private final List<AssetEmit> allEmitted = Collections.synchronizedList(new ArrayList<>());
+    private volatile boolean throwUnsupportedOperationOnEmit = false;
 
     @Override
     public AssetEmitter of(boolean enable) {
+        if (throwUnsupportedOperationOnEmit) {
+            return new ThrowingAssetEmitter();
+        }
         return new TrackingAssetEmitter(allEmitted, enable);
     }
 
@@ -26,8 +30,17 @@ public class TestAssetManagerFactory extends AssetManagerFactory {
         return List.copyOf(allEmitted);
     }
 
+    /**
+     * Makes the next emitter's {@code emit()} throw {@link UnsupportedOperationException}, mirroring the
+     * real {@link AssetManagerFactory#of(boolean)} default on OSS where the EE emitter isn't available.
+     */
+    public void throwUnsupportedOperationOnEmit(boolean throwing) {
+        this.throwUnsupportedOperationOnEmit = throwing;
+    }
+
     public void clear() {
         allEmitted.clear();
+        throwUnsupportedOperationOnEmit = false;
     }
 
     private static final class TrackingAssetEmitter implements AssetEmitter {
@@ -52,6 +65,18 @@ public class TestAssetManagerFactory extends AssetManagerFactory {
         @Override
         public List<AssetEmit> emitted() {
             return List.copyOf(local);
+        }
+    }
+
+    private static final class ThrowingAssetEmitter implements AssetEmitter {
+        @Override
+        public void emit(AssetEmit assetEmit) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<AssetEmit> emitted() {
+            return List.of();
         }
     }
 }
