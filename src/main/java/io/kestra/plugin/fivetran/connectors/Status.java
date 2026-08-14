@@ -103,7 +103,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
         description = "Buffer added on top of each connector's `syncFrequency` when deciding whether its last sync is fresh. Default is no buffer (`PT0S`)."
     )
     @Builder.Default
-    @PluginProperty(group = "reliability")
+    @PluginProperty(group = "main")
     Property<Duration> slack = Property.ofValue(Duration.ZERO);
 
     @Schema(
@@ -111,7 +111,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
         description = "When true (default), poll all connectors until each one is fresh, capped by `maxDuration`. Set to false to read each connector once and report its status without gating."
     )
     @Builder.Default
-    @PluginProperty(group = "execution")
+    @PluginProperty(group = "main")
     Property<Boolean> wait = Property.ofValue(true);
 
     @Schema(
@@ -119,7 +119,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
         description = "Upper bound for waiting when `wait` is true. Default is 1 hour."
     )
     @Builder.Default
-    @PluginProperty(group = "execution")
+    @PluginProperty(group = "advanced")
     Property<Duration> maxDuration = Property.ofValue(Duration.ofHours(1));
 
     @Schema(
@@ -135,7 +135,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
         description = "When `wait` is true, a paused connector or one whose setup is not `connected` can never become fresh, so the task fails fast by default instead of polling forever. Set to true to report such connectors as not-fresh instead, letting the gate wait out `maxDuration`."
     )
     @Builder.Default
-    @PluginProperty(group = "reliability")
+    @PluginProperty(group = "advanced")
     Property<Boolean> allowFailed = Property.ofValue(false);
 
     @Override
@@ -215,9 +215,8 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
                             );
                         }
 
-                        // A connector already fresh has satisfied the gate's promise regardless of its
-                        // current paused/setup state (e.g. paused-after-sync-cost), so only fail fast when
-                        // it is NOT fresh and can never become fresh on its own.
+                        // An already-fresh connector satisfies the gate even if now paused, so only fail
+                        // fast when it is not fresh and cannot become fresh on its own.
                         if (!rAllowFailed && !Boolean.TRUE.equals(state.getFresh()) && isTerminal(connector)) {
                             throw new IllegalStateException(
                                 "Connector '" + connectorId + "' cannot become fresh: " + terminalReason(connector)
@@ -277,11 +276,9 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
     }
 
     /**
-     * Null when Fivetran reports no sync_frequency, since freshness cannot be related to a frequency that
-     * doesn't exist. Otherwise, fresh only if the last completion was a success within syncFrequency + slack
-     * of {@code now}, boundary inclusive: a success landing exactly on the threshold still counts as fresh.
-     * Package-private and parameterized on {@code now} so the boundary can be asserted deterministically in
-     * tests instead of racing the real clock.
+     * Fresh when the last completion was a success within syncFrequency + slack of {@code now}, boundary
+     * inclusive. Null when Fivetran reports no sync_frequency. Parameterized on {@code now} so tests can
+     * assert the boundary deterministically instead of racing the real clock.
      */
     static Boolean computeFresh(ZonedDateTime succeededAt, boolean hasFailed, Integer syncFrequency, Duration slack, ZonedDateTime now) {
         if (syncFrequency == null) {
@@ -383,20 +380,15 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
             : sanitizeSegment(connectorId);
     }
 
-    // Segments must be sanitized individually, before "." is added as the delimiter: a raw segment can
-    // itself contain a "." (e.g. Fivetran schema "google_sheets.destination"), so joining unsanitized
-    // segments is ambiguous, letting ("g", "a.b") and ("g.a", "b") both compose to the same id "g.a.b".
-    // Replacing "." (and anything else outside the allowed set) with "_" within each segment first means
-    // "." in the composed id can only ever be the delimiter added here.
+    // Sanitize each segment before joining so "." only ever appears as the delimiter: a raw segment can
+    // contain "." (e.g. schema "google_sheets.destination"), which would otherwise make the id ambiguous.
     private static String sanitizeSegment(String segment) {
         return segment.replaceAll("[^a-zA-Z0-9_:-]", "_");
     }
 
-    // Fivetran ids (group_id, schema, connector id) are not guaranteed to satisfy Asset's id pattern
-    // (^[a-zA-Z0-9][a-zA-Z0-9._:-]*, size 1-150). composeAssetId already restricts every segment to that
-    // character set via sanitizeSegment, so only the leading-alnum trim and size bound remain here.
-    // An id made only of characters stripped by the leading-alnum trim (e.g. "___") would otherwise
-    // sanitize down to "", violating Asset.id's @NotBlank/@Size(min=1); fall back to a fixed placeholder.
+    // Enforce the rest of Asset's id contract (^[a-zA-Z0-9]..., size 1-150) that per-segment sanitization
+    // leaves: trim leading non-alphanumerics, fall back to a placeholder if that empties the id (e.g. "___"),
+    // and cap the length.
     private static String sanitizeAssetId(String rawId) {
         String sanitized = rawId.replaceFirst("^[^a-zA-Z0-9]+", "");
         if (sanitized.isEmpty()) {
