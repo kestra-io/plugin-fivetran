@@ -194,9 +194,13 @@ public abstract class AbstractFivetranConnection extends Task {
      * URL-encodes a connector ID before it is interpolated into a Fivetran API path, so an id containing
      * reserved URL characters cannot alter the request path. Shared by every task/trigger that builds a
      * connector path, so the GET status read and the POST sync trigger stay consistent.
+     * <p>
+     * {@link URLEncoder} applies {@code application/x-www-form-urlencoded} rules, which encode a space as
+     * {@code +}. That is wrong for a URL path segment, where {@code +} is a literal character and a space
+     * must become {@code %20}, so the {@code +} produced by the encoder is corrected afterward.
      */
     protected static String encodeConnectorId(String connectorId) {
-        return URLEncoder.encode(connectorId, StandardCharsets.UTF_8);
+        return URLEncoder.encode(connectorId, StandardCharsets.UTF_8).replace("+", "%20");
     }
 
     /**
