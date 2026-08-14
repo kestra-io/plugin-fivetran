@@ -127,7 +127,7 @@ class StatusTest {
     }
 
     @Test
-    @DisplayName("Should mark a connector fresh only when its last success is within syncFrequency plus slack")
+    @DisplayName("Should mark a connector fresh only when its last success is within syncFrequency plus freshnessBuffer")
     void computesFreshnessFromSucceededAtAndSyncFrequency(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         String freshConnectorId = "fresh_connector";
         String staleConnectorId = "stale_connector";
@@ -165,11 +165,11 @@ class StatusTest {
     }
 
     @Test
-    @DisplayName("Should let slack widen the freshness window beyond syncFrequency")
-    void slackWidensTheFreshnessWindow(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
-        String connectorId = "slack_connector";
+    @DisplayName("Should let freshnessBuffer widen the freshness window beyond syncFrequency")
+    void freshnessBufferWidensTheFreshnessWindow(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        String connectorId = "buffer_connector";
 
-        // 400 minutes ago: stale against a 360-minute sync_frequency alone, fresh once a 1-hour slack is added.
+        // 400 minutes ago: stale against a 360-minute sync_frequency alone, fresh once a 1-hour buffer is added.
         stubFor(
             get(urlEqualTo("/v2/connectors/" + connectorId))
                 .willReturn(
@@ -184,7 +184,7 @@ class StatusTest {
             .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
             .connectorIds(Property.ofValue(List.of(connectorId)))
             .wait(Property.ofValue(false))
-            .slack(Property.ofValue(Duration.ofHours(1)))
+            .freshnessBuffer(Property.ofValue(Duration.ofHours(1)))
             .build();
 
         Status.Output output = task.run(runContext());
@@ -294,7 +294,7 @@ class StatusTest {
             .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
             .connectorIds(Property.ofValue(List.of(connectorId)))
             .wait(Property.ofValue(true))
-            .allowFailed(Property.ofValue(false))
+            .allowTerminal(Property.ofValue(false))
             .pollFrequency(Property.ofValue(Duration.ofMillis(100)))
             .maxDuration(Property.ofValue(Duration.ofSeconds(5)))
             .build();
@@ -632,16 +632,16 @@ class StatusTest {
     void treatsJustInsideThresholdAsFreshInclusiveBoundary(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         String connectorId = "boundary_connector";
         int syncFrequencyMinutes = 5;
-        Duration slack = Duration.ofSeconds(30);
+        Duration buffer = Duration.ofSeconds(30);
 
-        // The freshness threshold is `now - (syncFrequency + slack)`, evaluated at task run time. Exact
+        // The freshness threshold is `now - (syncFrequency + freshnessBuffer)`, evaluated at task run time. Exact
         // equality can't be asserted from a black-box test since "now" is not injectable, so succeededAt is
         // pinned 1 second newer than the threshold computed here, right before the stub is set up. Task
         // execution (a couple of WireMock round trips) always finishes well under that 1s margin, so the
         // connector remains inside the window at evaluation time. Under the old strict `isAfter` check this
         // margin would occasionally get eaten by test-execution jitter and flip the result to stale; the
         // inclusive `!isBefore` check keeps it deterministically fresh.
-        ZonedDateTime threshold = ZonedDateTime.now().minusMinutes(syncFrequencyMinutes).minus(slack);
+        ZonedDateTime threshold = ZonedDateTime.now().minusMinutes(syncFrequencyMinutes).minus(buffer);
         String succeededAt = threshold.plusSeconds(1).toInstant().toString();
 
         stubFor(
@@ -658,7 +658,7 @@ class StatusTest {
             .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
             .connectorIds(Property.ofValue(List.of(connectorId)))
             .wait(Property.ofValue(false))
-            .slack(Property.ofValue(slack))
+            .freshnessBuffer(Property.ofValue(buffer))
             .build();
 
         Status.Output output = task.run(runContext());
@@ -667,29 +667,29 @@ class StatusTest {
     }
 
     @Test
-    @DisplayName("Should treat succeededAt exactly at the syncFrequency+slack threshold as fresh, and one nanosecond later as stale")
+    @DisplayName("Should treat succeededAt exactly at the syncFrequency+freshnessBuffer threshold as fresh, and one nanosecond later as stale")
     void computeFreshIsInclusiveOfTheExactBoundary() {
         ZonedDateTime succeededAt = ZonedDateTime.parse("2026-01-01T00:00:00Z");
         int syncFrequencyMinutes = 60;
-        Duration slack = Duration.ofMinutes(5);
-        // The threshold is `now - syncFrequency - slack`; equivalently, succeededAt is fresh as long as
-        // `now` has not yet passed `succeededAt + syncFrequency + slack`.
-        ZonedDateTime boundaryNow = succeededAt.plusMinutes(syncFrequencyMinutes).plus(slack);
+        Duration buffer = Duration.ofMinutes(5);
+        // The threshold is `now - syncFrequency - buffer`; equivalently, succeededAt is fresh as long as
+        // `now` has not yet passed `succeededAt + syncFrequency + buffer`.
+        ZonedDateTime boundaryNow = succeededAt.plusMinutes(syncFrequencyMinutes).plus(buffer);
 
         assertThat(
-            Status.computeFresh(succeededAt, false, syncFrequencyMinutes, slack, boundaryNow),
+            Status.computeFresh(succeededAt, false, syncFrequencyMinutes, buffer, boundaryNow),
             is(true)
         );
         assertThat(
-            Status.computeFresh(succeededAt, false, syncFrequencyMinutes, slack, boundaryNow.plusNanos(1)),
+            Status.computeFresh(succeededAt, false, syncFrequencyMinutes, buffer, boundaryNow.plusNanos(1)),
             is(false)
         );
         assertThat(
-            Status.computeFresh(succeededAt, false, null, slack, boundaryNow),
+            Status.computeFresh(succeededAt, false, null, buffer, boundaryNow),
             is(nullValue())
         );
         assertThat(
-            Status.computeFresh(succeededAt, true, syncFrequencyMinutes, slack, succeededAt),
+            Status.computeFresh(succeededAt, true, syncFrequencyMinutes, buffer, succeededAt),
             is(false)
         );
     }
@@ -786,27 +786,27 @@ class StatusTest {
     }
 
     @Test
-    @DisplayName("Should reject a negative slack before making any HTTP call")
-    void failsWhenSlackIsNegative(WireMockRuntimeInfo wmRuntimeInfo) {
+    @DisplayName("Should reject a negative freshnessBuffer before making any HTTP call")
+    void failsWhenFreshnessBufferIsNegative(WireMockRuntimeInfo wmRuntimeInfo) {
         Status task = Status.builder()
             .apiKey(Property.ofValue("dummy-api-key"))
             .apiSecret(Property.ofValue("dummy-api-secret"))
             .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
             .connectorIds(Property.ofValue(List.of("any_connector")))
             .wait(Property.ofValue(false))
-            .slack(Property.ofValue(Duration.ofMinutes(-5)))
+            .freshnessBuffer(Property.ofValue(Duration.ofMinutes(-5)))
             .build();
 
         IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class, () -> task.run(runContext()));
-        assertThat(thrown.getMessage(), containsString("slack must not be negative"));
+        assertThat(thrown.getMessage(), containsString("freshnessBuffer must not be negative"));
 
         verify(exactly(0), getRequestedFor(urlMatching("/v2/connectors/.*")));
     }
 
     @Test
-    @DisplayName("Should not fail fast but time out when allowFailed is true and a stale connector is paused")
-    void allowFailedLetsStalePausedConnectorTimeOutInsteadOfFailingFast(WireMockRuntimeInfo wmRuntimeInfo) {
-        String connectorId = "allow_failed_stale_paused_connector";
+    @DisplayName("Should not fail fast but time out when allowTerminal is true and a stale connector is paused")
+    void allowTerminalLetsStalePausedConnectorTimeOutInsteadOfFailingFast(WireMockRuntimeInfo wmRuntimeInfo) {
+        String connectorId = "allow_terminal_stale_paused_connector";
 
         stubFor(
             get(urlEqualTo("/v2/connectors/" + connectorId))
@@ -821,7 +821,7 @@ class StatusTest {
             .apiSecret(Property.ofValue("dummy-api-secret"))
             .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
             .connectorIds(Property.ofValue(List.of(connectorId)))
-            .allowFailed(Property.ofValue(true))
+            .allowTerminal(Property.ofValue(true))
             .pollFrequency(Property.ofValue(Duration.ofMillis(100)))
             .maxDuration(Property.ofValue(Duration.ofSeconds(1)))
             .build();

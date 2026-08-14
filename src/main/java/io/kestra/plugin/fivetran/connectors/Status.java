@@ -60,7 +60,7 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
                     connectorIds:
                       - connector_id_1
                       - connector_id_2
-                    slack: PT10M
+                    freshnessBuffer: PT10M
 
                   - id: run_after_fresh_data
                     type: io.kestra.plugin.core.log.Log
@@ -99,12 +99,12 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
     private Property<List<String>> connectorIds;
 
     @Schema(
-        title = "Freshness slack",
+        title = "Freshness buffer",
         description = "Buffer added on top of each connector's `syncFrequency` when deciding whether its last sync is fresh. Default is no buffer (`PT0S`)."
     )
     @Builder.Default
     @PluginProperty(group = "main")
-    Property<Duration> slack = Property.ofValue(Duration.ZERO);
+    Property<Duration> freshnessBuffer = Property.ofValue(Duration.ZERO);
 
     @Schema(
         title = "Wait until every connector is fresh",
@@ -136,7 +136,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
     )
     @Builder.Default
     @PluginProperty(group = "advanced")
-    Property<Boolean> allowFailed = Property.ofValue(false);
+    Property<Boolean> allowTerminal = Property.ofValue(false);
 
     @Override
     public Output run(RunContext runContext) throws Exception {
@@ -151,16 +151,16 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
                 throw new IllegalArgumentException("connectorIds[" + i + "] must not be null or blank");
             }
         }
-        Duration rSlack = runContext.render(this.slack).as(Duration.class).orElse(Duration.ZERO);
-        if (rSlack.isNegative()) {
-            throw new IllegalArgumentException("slack must not be negative, but was " + rSlack);
+        Duration rFreshnessBuffer = runContext.render(this.freshnessBuffer).as(Duration.class).orElse(Duration.ZERO);
+        if (rFreshnessBuffer.isNegative()) {
+            throw new IllegalArgumentException("freshnessBuffer must not be negative, but was " + rFreshnessBuffer);
         }
         boolean rWait = runContext.render(this.wait).as(Boolean.class).orElse(true);
-        boolean rAllowFailed = runContext.render(this.allowFailed).as(Boolean.class).orElse(false);
+        boolean rAllowTerminal = runContext.render(this.allowTerminal).as(Boolean.class).orElse(false);
 
         if (!rWait) {
             Map<String, Connector> connectors = fetchAll(runContext, rConnectorIds);
-            Map<String, ConnectorState> states = toStates(connectors, rSlack);
+            Map<String, ConnectorState> states = toStates(connectors, rFreshnessBuffer);
             logStates(logger, states);
             emitAssets(runContext, connectors, states);
             return Output.builder().connectors(states).build();
@@ -199,7 +199,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
                         throw e;
                     }
 
-                    Map<String, ConnectorState> states = toStates(current, rSlack);
+                    Map<String, ConnectorState> states = toStates(current, rFreshnessBuffer);
                     lastSeenStates.set(states);
                     lastSeenConnectors.set(current);
 
@@ -217,7 +217,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
 
                         // An already-fresh connector satisfies the gate even if now paused, so only fail
                         // fast when it is not fresh and cannot become fresh on its own.
-                        if (!rAllowFailed && !Boolean.TRUE.equals(state.getFresh()) && isTerminal(connector)) {
+                        if (!rAllowTerminal && !Boolean.TRUE.equals(state.getFresh()) && isTerminal(connector)) {
                             throw new IllegalStateException(
                                 "Connector '" + connectorId + "' cannot become fresh: " + terminalReason(connector)
                             );
@@ -248,14 +248,14 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
         return connectors;
     }
 
-    private static Map<String, ConnectorState> toStates(Map<String, Connector> connectors, Duration slack) {
+    private static Map<String, ConnectorState> toStates(Map<String, Connector> connectors, Duration buffer) {
         ZonedDateTime now = ZonedDateTime.now();
         Map<String, ConnectorState> states = new LinkedHashMap<>();
-        connectors.forEach((id, connector) -> states.put(id, toConnectorState(connector, now, slack)));
+        connectors.forEach((id, connector) -> states.put(id, toConnectorState(connector, now, buffer)));
         return states;
     }
 
-    private static ConnectorState toConnectorState(Connector connector, ZonedDateTime now, Duration slack) {
+    private static ConnectorState toConnectorState(Connector connector, ZonedDateTime now, Duration buffer) {
         ConnectorStatusResponse status = connector.getStatus();
 
         return ConnectorState.builder()
@@ -271,23 +271,23 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
             .syncState(status != null ? status.getSyncState() : null)
             .setupState(status != null ? status.getSetupState() : null)
             .schemaStatus(status != null ? status.getSchemaStatus() : null)
-            .fresh(computeFresh(connector.getSucceededAt(), connector.hasFailed(), connector.getSyncFrequency(), slack, now))
+            .fresh(computeFresh(connector.getSucceededAt(), connector.hasFailed(), connector.getSyncFrequency(), buffer, now))
             .build();
     }
 
     /**
-     * Fresh when the last completion was a success within syncFrequency + slack of {@code now}, boundary
+     * Fresh when the last completion was a success within syncFrequency + buffer of {@code now}, boundary
      * inclusive. Null when Fivetran reports no sync_frequency. Parameterized on {@code now} so tests can
      * assert the boundary deterministically instead of racing the real clock.
      */
-    static Boolean computeFresh(ZonedDateTime succeededAt, boolean hasFailed, Integer syncFrequency, Duration slack, ZonedDateTime now) {
+    static Boolean computeFresh(ZonedDateTime succeededAt, boolean hasFailed, Integer syncFrequency, Duration buffer, ZonedDateTime now) {
         if (syncFrequency == null) {
             return null;
         }
 
         return succeededAt != null
             && !hasFailed
-            && !succeededAt.isBefore(now.minusMinutes(syncFrequency).minus(slack));
+            && !succeededAt.isBefore(now.minusMinutes(syncFrequency).minus(buffer));
     }
 
     // A paused connector, or one whose setup is not connected (broken, incomplete, bad-auth), can never
@@ -478,7 +478,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
 
         @Schema(
             title = "Whether the connector's last sync is fresh",
-            description = "True when the last sync succeeded within `syncFrequency` plus `slack` of now. False when stale, or the last completion was a failure. Null when Fivetran reported no `syncFrequency` for this connector, so freshness cannot be computed."
+            description = "True when the last sync succeeded within `syncFrequency` plus `freshnessBuffer` of now. False when stale, or the last completion was a failure. Null when Fivetran reported no `syncFrequency` for this connector, so freshness cannot be computed."
         )
         Boolean fresh;
     }
