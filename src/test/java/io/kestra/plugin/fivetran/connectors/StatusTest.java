@@ -45,6 +45,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @KestraTest
@@ -272,6 +273,38 @@ class StatusTest {
     }
 
     @Test
+    @DisplayName("Should succeed in wait mode when a connector is already fresh even though it is now paused")
+    void succeedsOnAlreadyFreshPausedConnectorInWaitMode(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        String connectorId = "fresh_then_paused_connector";
+
+        // Fivetran commonly pauses a connector right after it syncs to control cost; it is still fresh,
+        // so the fail-fast gate must not fire on it.
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + connectorId))
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody(connectorId, isoNow(-10), null, true, "connected", 360, null))
+                )
+        );
+
+        Status task = Status.builder()
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .connectorIds(Property.ofValue(List.of(connectorId)))
+            .wait(Property.ofValue(true))
+            .allowFailed(Property.ofValue(false))
+            .pollFrequency(Property.ofValue(Duration.ofMillis(100)))
+            .maxDuration(Property.ofValue(Duration.ofSeconds(5)))
+            .build();
+
+        Status.Output output = task.run(runContext());
+
+        assertThat(output.getConnectors().get(connectorId).getFresh(), is(true));
+        assertThat(output.getConnectors().get(connectorId).getPaused(), is(true));
+    }
+
+    @Test
     @DisplayName("Should fail fast on a connector whose setup is not connected when waiting for freshness")
     void failsFastOnNonConnectedSetupStateInWaitMode(WireMockRuntimeInfo wmRuntimeInfo) {
         String connectorId = "broken_connector";
@@ -481,6 +514,86 @@ class StatusTest {
     }
 
     @Test
+    @DisplayName("Should sanitize a dot inside a schema so it is never mistaken for the group/schema delimiter")
+    void sanitizesDotInsideSchemaSoItCannotCollideWithDelimiter(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        String connectorId = "dotted_schema_connector";
+        // Fivetran can report a schema containing a dot, e.g. "google_sheets.destination".
+        String schema = "google_sheets.destination";
+
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + connectorId))
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody(connectorId, isoNow(-10), null, false, "connected", 360, schema))
+                )
+        );
+
+        Status task = Status.builder()
+            .id("status")
+            .type(Status.class.getName())
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .connectorIds(Property.ofValue(List.of(connectorId)))
+            .wait(Property.ofValue(false))
+            .assets(new AssetsDeclaration(true, List.of(), List.of()))
+            .build();
+
+        task.run(runContextFactory.of(task, Map.of()));
+
+        List<AssetEmit> emitted = assetManagerFactory.allEmitted();
+        assertThat(emitted, hasSize(1));
+        // connectorBody's fixture hardcodes group_id to "some_group"; the schema's dot is replaced with "_".
+        assertThat(emitted.get(0).outputs().get(0).getId(), is("some_group.google_sheets_destination"));
+    }
+
+    @Test
+    @DisplayName("Should compose distinct asset ids for a dotted groupId/schema pair that would otherwise collide")
+    void composesDistinctAssetIdsForDottedSegmentsThatWouldOtherwiseCollide(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        String connectorIdA = "collision_dot_connector_a";
+        String connectorIdB = "collision_dot_connector_b";
+
+        // Without per-segment sanitization, groupId="g"/schema="a.b" and groupId="g.a"/schema="b" would both
+        // naively join to "g.a.b". Sanitizing each segment before joining keeps their composed ids distinct.
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + connectorIdA))
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody(connectorIdA, isoNow(-10), null, false, "connected", 360, "a.b", "g"))
+                )
+        );
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + connectorIdB))
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody(connectorIdB, isoNow(-10), null, false, "connected", 360, "b", "g.a"))
+                )
+        );
+
+        Status task = Status.builder()
+            .id("status")
+            .type(Status.class.getName())
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .connectorIds(Property.ofValue(List.of(connectorIdA, connectorIdB)))
+            .wait(Property.ofValue(false))
+            .assets(new AssetsDeclaration(true, List.of(), List.of()))
+            .build();
+
+        task.run(runContextFactory.of(task, Map.of()));
+
+        List<AssetEmit> emitted = assetManagerFactory.allEmitted();
+        assertThat(emitted, hasSize(2));
+
+        String idA = emitted.get(0).outputs().get(0).getId();
+        String idB = emitted.get(1).outputs().get(0).getId();
+        assertThat(idA, is("g.a_b"));
+        assertThat(idB, is("g_a.b"));
+        assertThat(idA, is(not(idB)));
+    }
+
+    @Test
     @DisplayName("Should fall back to a non-empty placeholder asset id when groupId and schema sanitize down to nothing")
     void fallsBackToNonEmptyAssetIdWhenComposedIdSanitizesToEmpty(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         String connectorId = "underscore_connector";
@@ -669,6 +782,93 @@ class StatusTest {
         IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class, () -> task.run(runContext()));
         assertThat(thrown.getMessage(), containsString("pollFrequency"));
         assertThat(thrown.getMessage(), containsString("maxDuration"));
+    }
+
+    @Test
+    @DisplayName("Should reject a negative slack before making any HTTP call")
+    void failsWhenSlackIsNegative(WireMockRuntimeInfo wmRuntimeInfo) {
+        Status task = Status.builder()
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .connectorIds(Property.ofValue(List.of("any_connector")))
+            .wait(Property.ofValue(false))
+            .slack(Property.ofValue(Duration.ofMinutes(-5)))
+            .build();
+
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class, () -> task.run(runContext()));
+        assertThat(thrown.getMessage(), containsString("slack must not be negative"));
+
+        verify(exactly(0), getRequestedFor(urlMatching("/v2/connectors/.*")));
+    }
+
+    @Test
+    @DisplayName("Should not fail fast but time out when allowFailed is true and a stale connector is paused")
+    void allowFailedLetsStalePausedConnectorTimeOutInsteadOfFailingFast(WireMockRuntimeInfo wmRuntimeInfo) {
+        String connectorId = "allow_failed_stale_paused_connector";
+
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + connectorId))
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody(connectorId, null, null, true, "connected", 360, null))
+                )
+        );
+
+        Status task = Status.builder()
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .connectorIds(Property.ofValue(List.of(connectorId)))
+            .allowFailed(Property.ofValue(true))
+            .pollFrequency(Property.ofValue(Duration.ofMillis(100)))
+            .maxDuration(Property.ofValue(Duration.ofSeconds(1)))
+            .build();
+
+        TimeoutException thrown = assertThrows(TimeoutException.class, () -> task.run(runContext()));
+        assertThat(thrown.getMessage(), containsString(connectorId));
+        assertThat(thrown.getMessage(), containsString("did not become fresh"));
+    }
+
+    @Test
+    @DisplayName("Should recover from a transient error mid-poll and eventually succeed")
+    void recoversFromTransientErrorMidPollInWaitMode(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        String connectorId = "transient_error_connector";
+        String scenario = "status-transient-error-recovery";
+
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + connectorId))
+                .inScenario(scenario)
+                .whenScenarioStateIs(Scenario.STARTED)
+                .willSetStateTo("RECOVERED")
+                .willReturn(aResponse().withStatus(503))
+        );
+
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + connectorId))
+                .inScenario(scenario)
+                .whenScenarioStateIs("RECOVERED")
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody(connectorId, isoNow(-5), null, false, "connected", 360, null))
+                )
+        );
+
+        Status task = Status.builder()
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .connectorIds(Property.ofValue(List.of(connectorId)))
+            // A single attempt so the 503 bubbles up to the poll loop's own transient-error handling
+            // instead of being absorbed by the low-level request() retry.
+            .maxAttempts(Property.ofValue(1))
+            .pollFrequency(Property.ofValue(Duration.ofMillis(200)))
+            .maxDuration(Property.ofValue(Duration.ofSeconds(10)))
+            .build();
+
+        Status.Output output = assertDoesNotThrow(() -> task.run(runContext()));
+
+        assertThat(output.getConnectors().get(connectorId).getFresh(), is(true));
     }
 
     private RunContext runContext() {

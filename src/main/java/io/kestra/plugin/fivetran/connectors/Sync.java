@@ -34,8 +34,8 @@ import lombok.experimental.SuperBuilder;
 import static io.kestra.core.utils.Rethrow.throwSupplier;
 
 @SuperBuilder
-@ToString
-@EqualsAndHashCode
+@ToString(callSuper = true)
+@EqualsAndHashCode(callSuper = true)
 @Getter
 @NoArgsConstructor
 @Schema(

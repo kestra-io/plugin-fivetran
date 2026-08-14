@@ -36,8 +36,8 @@ import lombok.experimental.SuperBuilder;
 import static io.kestra.core.utils.Rethrow.throwSupplier;
 
 @SuperBuilder
-@ToString
-@EqualsAndHashCode
+@ToString(callSuper = true)
+@EqualsAndHashCode(callSuper = true)
 @Getter
 @NoArgsConstructor
 @Schema(
@@ -152,6 +152,9 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
             }
         }
         Duration rSlack = runContext.render(this.slack).as(Duration.class).orElse(Duration.ZERO);
+        if (rSlack.isNegative()) {
+            throw new IllegalArgumentException("slack must not be negative, but was " + rSlack);
+        }
         boolean rWait = runContext.render(this.wait).as(Boolean.class).orElse(true);
         boolean rAllowFailed = runContext.render(this.allowFailed).as(Boolean.class).orElse(false);
 
@@ -212,7 +215,10 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
                             );
                         }
 
-                        if (!rAllowFailed && isTerminal(connector)) {
+                        // A connector already fresh has satisfied the gate's promise regardless of its
+                        // current paused/setup state (e.g. paused-after-sync-cost), so only fail fast when
+                        // it is NOT fresh and can never become fresh on its own.
+                        if (!rAllowFailed && !Boolean.TRUE.equals(state.getFresh()) && isTerminal(connector)) {
                             throw new IllegalStateException(
                                 "Connector '" + connectorId + "' cannot become fresh: " + terminalReason(connector)
                             );
@@ -372,17 +378,27 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
     // (e.g. shared across groups) still get distinct asset ids; connectorId is the fallback when groupId is absent.
     private static String composeAssetId(String connectorId, Connector connector, String schema) {
         String prefix = connector.getGroupId() != null ? connector.getGroupId() : connectorId;
-        return schema != null ? prefix + "." + schema : connectorId;
+        return schema != null
+            ? sanitizeSegment(prefix) + "." + sanitizeSegment(schema)
+            : sanitizeSegment(connectorId);
+    }
+
+    // Segments must be sanitized individually, before "." is added as the delimiter: a raw segment can
+    // itself contain a "." (e.g. Fivetran schema "google_sheets.destination"), so joining unsanitized
+    // segments is ambiguous, letting ("g", "a.b") and ("g.a", "b") both compose to the same id "g.a.b".
+    // Replacing "." (and anything else outside the allowed set) with "_" within each segment first means
+    // "." in the composed id can only ever be the delimiter added here.
+    private static String sanitizeSegment(String segment) {
+        return segment.replaceAll("[^a-zA-Z0-9_:-]", "_");
     }
 
     // Fivetran ids (group_id, schema, connector id) are not guaranteed to satisfy Asset's id pattern
-    // (^[a-zA-Z0-9][a-zA-Z0-9._:-]*, size 1-150), so sanitize before handing it to the asset store.
+    // (^[a-zA-Z0-9][a-zA-Z0-9._:-]*, size 1-150). composeAssetId already restricts every segment to that
+    // character set via sanitizeSegment, so only the leading-alnum trim and size bound remain here.
     // An id made only of characters stripped by the leading-alnum trim (e.g. "___") would otherwise
     // sanitize down to "", violating Asset.id's @NotBlank/@Size(min=1); fall back to a fixed placeholder.
     private static String sanitizeAssetId(String rawId) {
-        String sanitized = rawId
-            .replaceAll("[^a-zA-Z0-9._:-]", "_")
-            .replaceFirst("^[^a-zA-Z0-9]+", "");
+        String sanitized = rawId.replaceFirst("^[^a-zA-Z0-9]+", "");
         if (sanitized.isEmpty()) {
             sanitized = "connector";
         }
