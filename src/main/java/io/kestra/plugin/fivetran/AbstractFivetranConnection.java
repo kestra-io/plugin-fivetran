@@ -3,6 +3,9 @@ package io.kestra.plugin.fivetran;
 import java.io.IOException;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
+import java.net.URI;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 
 import org.apache.hc.core5.http.Method;
@@ -26,6 +29,8 @@ import io.kestra.core.models.tasks.Task;
 import io.kestra.core.models.tasks.retrys.Exponential;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.utils.RetryUtils;
+import io.kestra.plugin.fivetran.models.Connector;
+import io.kestra.plugin.fivetran.models.ConnectorResponse;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.Min;
@@ -54,6 +59,7 @@ public abstract class AbstractFivetranConnection extends Task {
         description = "Required; paired with `apiSecret` for HTTP Basic authentication."
     )
     @NotNull
+    @ToString.Exclude
     @PluginProperty(secret = true, group = "connection")
     Property<String> apiKey;
 
@@ -62,6 +68,7 @@ public abstract class AbstractFivetranConnection extends Task {
         description = "Required secret token used with `apiKey` for Basic authentication."
     )
     @NotNull
+    @ToString.Exclude
     @PluginProperty(secret = true, group = "connection")
     Property<String> apiSecret;
 
@@ -158,6 +165,38 @@ public abstract class AbstractFivetranConnection extends Task {
         } catch (IOException e) {
             throw new RuntimeException("Error executing HTTP request", e);
         }
+    }
+
+    /**
+     * Reads a connector's current status via GET, without triggering a sync.
+     *
+     * @param runContext The run context used to render properties and build the HTTP client.
+     * @param connectorId The already-rendered Fivetran connector ID.
+     * @return The connector as returned by the Fivetran API.
+     */
+    protected Connector fetchConnector(RunContext runContext, String connectorId)
+        throws IllegalVariableEvaluationException, HttpClientException {
+        HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
+            .uri(
+                URI.create(
+                    runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
+                        "/v2/connectors/" + encodeConnectorId(connectorId)
+                )
+            )
+            .method("GET");
+
+        HttpResponse<ConnectorResponse> response = this.request(runContext, requestBuilder, ConnectorResponse.class);
+
+        return response.getBody().getData();
+    }
+
+    /**
+     * URL-encodes a connector ID before it is interpolated into a Fivetran API path, so an id containing
+     * reserved URL characters cannot alter the request path. Shared by every task/trigger that builds a
+     * connector path, so the GET status read and the POST sync trigger stay consistent.
+     */
+    protected static String encodeConnectorId(String connectorId) {
+        return URLEncoder.encode(connectorId, StandardCharsets.UTF_8);
     }
 
     /**

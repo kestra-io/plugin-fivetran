@@ -25,6 +25,9 @@ public class Connector {
     @JsonProperty("name")
     String name;
 
+    @JsonProperty("schema")
+    String schema;
+
     @JsonProperty("paused")
     Boolean paused;
 

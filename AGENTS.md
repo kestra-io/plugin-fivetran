@@ -3,7 +3,7 @@
 ## What
 
 - Provides plugin components under `io.kestra.plugin.fivetran`.
-- Includes classes such as `Sync`, `SyncResponse`, `ConnectorStatusResponse`, `ConnectorResponse`.
+- Includes classes such as `Sync`, `Status`, `SyncResponse`, `ConnectorStatusResponse`, `ConnectorResponse`.
 
 ## Why
 
@@ -21,7 +21,8 @@ Single-module plugin. Source packages under `io.kestra.plugin`:
 
 ### Key Plugin Classes
 
-- `io.kestra.plugin.fivetran.connectors.Sync`
+- `io.kestra.plugin.fivetran.connectors.Sync`: triggers a connector sync and optionally waits for completion.
+- `io.kestra.plugin.fivetran.connectors.Status`: reads the current status of one or more connectors via a single GET per connector, without triggering a sync. Computes a `fresh` verdict per connector from `succeededAt`/`syncFrequency`/`slack`, and by default (`wait: true`) polls until every connector is fresh or fails fast on a paused/broken connector, up to `maxDuration`. Emits one lineage asset per connector destination schema when `assets.enableAuto` is set, with the asset id composed as `groupId.schema` (falling back to `connectorId.schema` when `groupId` is absent) so connectors sharing a schema never collide.
 
 ### Project Structure
 

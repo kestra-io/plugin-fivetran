@@ -24,7 +24,6 @@ import io.kestra.core.runners.RunContext;
 import io.kestra.core.utils.Await;
 import io.kestra.plugin.fivetran.AbstractFivetranConnection;
 import io.kestra.plugin.fivetran.models.Connector;
-import io.kestra.plugin.fivetran.models.ConnectorResponse;
 import io.kestra.plugin.fivetran.models.SyncResponse;
 
 import io.swagger.v3.oas.annotations.media.Schema;
@@ -119,7 +118,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
             .uri(
                 URI.create(
                     runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
-                        "/v2/connectors/" + connectorId + "/sync"
+                        "/v2/connectors/" + encodeConnectorId(connectorId) + "/sync"
                 )
             )
             .method("POST")
@@ -203,19 +202,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
 
     private Connector fetchConnector(RunContext runContext) throws IllegalVariableEvaluationException, HttpClientException {
         String connectorId = runContext.render(this.connectorId).as(String.class).orElseThrow();
-
-        HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
-            .uri(
-                URI.create(
-                    runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
-                        "/v2/connectors/" + connectorId
-                )
-            )
-            .method("GET");
-
-        HttpResponse<ConnectorResponse> fetchConnector = this.request(runContext, requestBuilder, ConnectorResponse.class);
-
-        return fetchConnector.getBody().getData();
+        return this.fetchConnector(runContext, connectorId);
     }
 
 }
