@@ -549,6 +549,57 @@ class StatusTest {
     }
 
     @Test
+    @DisplayName("Should derive the asset id's schema segment from destination_schema.name, independent of the editable connector name")
+    void assetIdSchemaSegmentIsDerivedFromDestinationSchemaNameNotConnectorName(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        String connectorIdA = "renamed_connector_a";
+        String connectorIdB = "renamed_connector_b";
+        // The API's `name` for a connector landing in the "google_sheets" destination schema is
+        // conventionally "<schema>.<table>", which is exactly the value the old, buggy fallback used.
+        String editableNameA = "google_sheets.destination";
+        String editableNameB = "a_totally_different_display_name";
+        String stableDestinationSchemaName = "google_sheets";
+
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + connectorIdA))
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody(connectorIdA, editableNameA, isoNow(-10), null, false, "connected", 360, stableDestinationSchemaName, "some_group"))
+                )
+        );
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + connectorIdB))
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody(connectorIdB, editableNameB, isoNow(-10), null, false, "connected", 360, stableDestinationSchemaName, "some_group"))
+                )
+        );
+
+        Status task = Status.builder()
+            .id("status")
+            .type(Status.class.getName())
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .connectorIds(Property.ofValue(List.of(connectorIdA, connectorIdB)))
+            .wait(Property.ofValue(false))
+            .assets(new AssetsDeclaration(true, List.of(), List.of()))
+            .build();
+
+        task.run(runContextFactory.of(task, Map.of()));
+
+        List<AssetEmit> emitted = assetManagerFactory.allEmitted();
+        assertThat(emitted, hasSize(2));
+
+        String idA = emitted.get(0).outputs().get(0).getId();
+        String idB = emitted.get(1).outputs().get(0).getId();
+        // Same destination_schema.name and groupId across both connectors, despite completely different
+        // editable names, must yield the same, name-independent asset id.
+        assertThat(idA, is("some_group.google_sheets"));
+        assertThat(idB, is("some_group.google_sheets"));
+        assertThat(idA, is(idB));
+    }
+
+    @Test
     @DisplayName("Should compose distinct asset ids for a dotted groupId/schema pair that would otherwise collide")
     void composesDistinctAssetIdsForDottedSegmentsThatWouldOtherwiseCollide(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         String connectorIdA = "collision_dot_connector_a";
@@ -1006,12 +1057,28 @@ class StatusTest {
         Integer syncFrequency,
         String schema,
         String groupId) {
+        return connectorBody(connectorId, connectorId, succeededAt, failedAt, paused, setupState, syncFrequency, schema, groupId);
+    }
+
+    // The real Fivetran v2 API always returns a null top-level `schema` and carries the stable schema name
+    // under `destination_schema.name` instead; `name` is the separate, user-editable display name.
+    private static String connectorBody(
+        String connectorId,
+        String name,
+        String succeededAt,
+        String failedAt,
+        boolean paused,
+        String setupState,
+        Integer syncFrequency,
+        String schema,
+        String groupId) {
         return """
             {
               "code": "Success",
               "data": {
                 "id": "%s",
                 "name": "%s",
+                "schema": null,
                 %s
                 "paused": %s,
                 "version": 1,
@@ -1038,8 +1105,8 @@ class StatusTest {
             }
             """.formatted(
             connectorId,
-            connectorId,
-            schemaField(schema),
+            name,
+            destinationSchemaField(schema),
             paused,
             setupState,
             jsonValue(succeededAt),
@@ -1049,8 +1116,10 @@ class StatusTest {
         );
     }
 
-    private static String schemaField(String schema) {
-        return schema == null ? "" : "\"schema\": \"" + schema + "\",";
+    private static String destinationSchemaField(String schema) {
+        return schema == null
+            ? ""
+            : "\"destination_schema\": {\"name\": \"" + schema + "\", \"table\": \"destination\", \"table_group_name\": \"destination\"},";
     }
 
     private static String jsonValue(String value) {

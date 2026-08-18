@@ -28,6 +28,9 @@ public class Connector {
     @JsonProperty("schema")
     String schema;
 
+    @JsonProperty("destination_schema")
+    DestinationSchema destinationSchema;
+
     @JsonProperty("paused")
     Boolean paused;
 
@@ -97,5 +100,17 @@ public class Connector {
     public boolean hasFailed() {
         return this.getFailedAt() != null &&
             (this.getSucceededAt() == null || !this.getSucceededAt().isAfter(this.getFailedAt()));
+    }
+
+    // Prefer the structured, stable destination_schema.name. Fall back to the legacy top-level `schema`
+    // (older API), and only then to the editable display name as a last resort.
+    public String destinationSchemaName() {
+        if (this.destinationSchema != null && this.destinationSchema.getName() != null) {
+            return this.destinationSchema.getName();
+        }
+        if (this.schema != null) {
+            return this.schema;
+        }
+        return this.name;
     }
 }

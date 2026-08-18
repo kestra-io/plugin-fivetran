@@ -340,8 +340,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
         for (Map.Entry<String, Connector> entry : connectors.entrySet()) {
             String connectorId = entry.getKey();
             Connector connector = entry.getValue();
-            // Fivetran's connector destination schema; name is the only sane fallback when it's absent.
-            String schema = connector.getSchema() != null ? connector.getSchema() : connector.getName();
+            String schema = connector.destinationSchemaName();
             String assetId = sanitizeAssetId(composeAssetId(connectorId, connector, schema));
 
             Map<String, Object> metadata = new LinkedHashMap<>();
