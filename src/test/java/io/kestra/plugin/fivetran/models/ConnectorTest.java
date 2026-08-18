@@ -54,4 +54,39 @@ class ConnectorTest {
 
         assertThat(connector.hasFailed(), is(true));
     }
+
+    // The v2 GET /connectors/{id} endpoint always returns a null top-level `schema`, so destination_schema.name
+    // is the only stable source; falling back to the editable `name` would silently break lineage on rename.
+    @Test
+    @DisplayName("Should prefer destination_schema.name when present")
+    void destinationSchemaNamePrefersStructuredDestinationSchema() {
+        Connector connector = Connector.builder()
+            .name("google_sheets.destination")
+            .schema("legacy_schema")
+            .destinationSchema(DestinationSchema.builder().name("google_sheets").build())
+            .build();
+
+        assertThat(connector.destinationSchemaName(), is("google_sheets"));
+    }
+
+    @Test
+    @DisplayName("Should fall back to the legacy top-level schema when destination_schema is absent")
+    void destinationSchemaNameFallsBackToLegacySchema() {
+        Connector connector = Connector.builder()
+            .name("google_sheets.destination")
+            .schema("legacy_schema")
+            .build();
+
+        assertThat(connector.destinationSchemaName(), is("legacy_schema"));
+    }
+
+    @Test
+    @DisplayName("Should fall back to the editable name as a last resort when both destination_schema and schema are absent")
+    void destinationSchemaNameFallsBackToNameAsLastResort() {
+        Connector connector = Connector.builder()
+            .name("google_sheets.destination")
+            .build();
+
+        assertThat(connector.destinationSchemaName(), is("google_sheets.destination"));
+    }
 }
