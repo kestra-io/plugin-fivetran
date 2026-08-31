@@ -18,7 +18,6 @@ import org.apache.hc.core5.http.Method;
 
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.http.HttpRequest;
@@ -39,6 +38,7 @@ import io.kestra.core.models.tasks.retrys.Exponential;
 import io.kestra.core.queues.QueueException;
 import io.kestra.core.runners.AssetEmit;
 import io.kestra.core.runners.RunContext;
+import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.utils.RetryUtils;
 import io.kestra.plugin.fivetran.models.Connector;
 import io.kestra.plugin.fivetran.models.ConnectorResponse;
@@ -60,9 +60,13 @@ import lombok.experimental.SuperBuilder;
 @Getter
 @NoArgsConstructor
 public abstract class AbstractFivetranConnection extends Task {
-    private static final ObjectMapper MAPPER = new ObjectMapper()
-        .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
-        .registerModule(new JavaTimeModule());
+    // Core's non-strict JSON mapper, so the plugin does not maintain a second Jackson configuration that
+    // can drift from the platform's. Zone adjustment is turned back off: Fivetran reports timestamps in UTC
+    // and they are surfaced verbatim in task output, so rewriting them into the worker's local zone would
+    // silently change every succeededAt/failedAt a flow already reads.
+    private static final ObjectMapper MAPPER = JacksonMapper.ofJson(false)
+        .copy()
+        .disable(DeserializationFeature.ADJUST_DATES_TO_CONTEXT_TIME_ZONE);
 
     private static final int TOO_MANY_REQUESTS = 429;
     private static final int SERVER_ERROR_MIN = 500;
@@ -78,6 +82,9 @@ public abstract class AbstractFivetranConnection extends Task {
     private static final Pattern LEADING_NON_ALPHANUMERIC = Pattern.compile("^[^a-zA-Z0-9]+");
 
     protected static final String TABLE_ASSET_TYPE = "io.kestra.plugin.ee.assets.Table";
+    // The connector-grain asset covers a whole destination schema, not one table. Both types have existed
+    // since EE 1.2.0, so naming it honestly costs nothing.
+    protected static final String DATASET_ASSET_TYPE = "io.kestra.plugin.ee.assets.Dataset";
     private static final String ASSET_SYSTEM = "fivetran";
     // Asset ids are constrained to 150 characters by the core Asset contract.
     private static final int MAX_ASSET_ID_LENGTH = 150;
@@ -228,6 +235,11 @@ public abstract class AbstractFivetranConnection extends Task {
         return runContext.render(this.getBaseUrl()).as(String.class).orElse(DEFAULT_BASE_URL);
     }
 
+    // Exposed for the mapper's timezone regression test.
+    static ObjectMapper mapper() {
+        return MAPPER;
+    }
+
     protected static String encodePathSegment(String segment) {
         return URLEncoder.encode(segment, StandardCharsets.UTF_8).replace("+", "%20");
     }
@@ -286,7 +298,7 @@ public abstract class AbstractFivetranConnection extends Task {
 
         HttpResponse<ConnectorSchemasResponse> response = this.request(runContext, requestBuilder, ConnectorSchemasResponse.class);
 
-        ConnectorSchemasResponse body = response.getBody();
+        var body = response.getBody();
         if (body == null || body.getData() == null || body.getData().getSchemas() == null) {
             return Map.of();
         }
@@ -360,7 +372,7 @@ public abstract class AbstractFivetranConnection extends Task {
 
         // Several connectors usually share one destination, so it is resolved once per group ID. Misses are
         // cached too, so a destination that cannot be read is not re-requested per connector.
-        Map<String, Destination> destinationByGroup = new HashMap<>();
+        var destinationByGroup = new HashMap<String, Destination>();
 
         for (Map.Entry<String, Connector> entry : connectors.entrySet()) {
             String connectorId = entry.getKey();
@@ -369,7 +381,7 @@ public abstract class AbstractFivetranConnection extends Task {
                 continue;
             }
 
-            List<Asset> assets = new ArrayList<>();
+            var assets = new ArrayList<Asset>();
             assets.add(connectorAsset(connectorId, connector, syncStates == null ? null : syncStates.get(connectorId)));
             assets.addAll(tableAssets(runContext, connectorId, connector, destinationByGroup));
 
@@ -395,7 +407,7 @@ public abstract class AbstractFivetranConnection extends Task {
     private static Asset connectorAsset(String connectorId, Connector connector, String syncState) {
         String schema = connector.destinationSchemaName();
 
-        Map<String, Object> metadata = new LinkedHashMap<>();
+        var metadata = new LinkedHashMap<String, Object>();
         metadata.put("system", ASSET_SYSTEM);
         metadata.put("connectorId", connectorId);
         metadata.put("schema", schema);
@@ -405,7 +417,7 @@ public abstract class AbstractFivetranConnection extends Task {
 
         return Custom.builder()
             .id(sanitizeAssetId(composeConnectorAssetId(connectorId, connector, schema)))
-            .type(TABLE_ASSET_TYPE)
+            .type(DATASET_ASSET_TYPE)
             .metadata(metadata)
             .build();
     }
@@ -443,8 +455,8 @@ public abstract class AbstractFivetranConnection extends Task {
             return List.of();
         }
 
-        List<Asset> assets = new ArrayList<>();
-        int enabledSchemas = 0;
+        var assets = new ArrayList<Asset>();
+        var enabledSchemas = 0;
         for (Map.Entry<String, ConnectorSchema> schemaEntry : schemas.entrySet()) {
             ConnectorSchema schema = schemaEntry.getValue();
             // A disabled schema or table is not written to the destination, so it is not an asset.
@@ -461,7 +473,7 @@ public abstract class AbstractFivetranConnection extends Task {
                 }
                 String tableName = table.destinationName(tableEntry.getKey());
 
-                Map<String, Object> metadata = new LinkedHashMap<>();
+                var metadata = new LinkedHashMap<String, Object>();
                 // plugin-dbt sets `system` to the warehouse adapter, not to itself. Both plugins write this
                 // same asset id, so naming the warehouse agrees with dbt for snowflake, databricks and
                 // redshift, where the two spellings are identical. They still differ on BigQuery, which
@@ -536,7 +548,7 @@ public abstract class AbstractFivetranConnection extends Task {
     // Sanitize each segment before joining so "." only ever appears as the delimiter: a raw segment can
     // contain "." (e.g. schema "google_sheets.destination"), which would otherwise make the id ambiguous.
     private static String joinSegments(String... segments) {
-        StringBuilder id = new StringBuilder();
+        var id = new StringBuilder();
         for (String segment : segments) {
             if (!id.isEmpty()) {
                 id.append('.');
@@ -569,7 +581,7 @@ public abstract class AbstractFivetranConnection extends Task {
         // tables of one schema: under a `database.schema.` prefix at the length cap every table would land on
         // the same id and all but the last would silently vanish from the graph. A digest of the full id keeps
         // them distinct. Not security-sensitive, it only has to separate ids sharing a 150-character prefix.
-        String suffix = "_" + String.format("%08x", sanitized.hashCode());
+        var suffix = "_" + String.format("%08x", sanitized.hashCode());
         return sanitized.substring(0, MAX_ASSET_ID_LENGTH - suffix.length()) + suffix;
     }
 }
