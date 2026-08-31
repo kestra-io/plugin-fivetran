@@ -21,8 +21,21 @@ Single-module plugin. Source packages under `io.kestra.plugin`:
 
 ### Key Plugin Classes
 
-- `io.kestra.plugin.fivetran.connectors.Sync`: triggers a connector sync and optionally waits for completion.
-- `io.kestra.plugin.fivetran.connectors.Status`: reads the current status of one or more connectors via a single GET per connector, without triggering a sync. Computes a `fresh` verdict per connector from `succeededAt`/`syncFrequency`/`freshnessBuffer`, and by default (`wait: true`) polls until every connector is fresh or fails fast on a paused/broken connector, up to `maxDuration`. Emits one lineage asset per connector destination schema when `assets.enableAuto` is set, with the asset id composed as `groupId.schema` (falling back to `connectorId.schema` when `groupId` is absent) so connectors sharing a schema never collide. Each segment is sanitized on its own before being joined with `.`, so a `.` inside a raw segment (e.g. schema `google_sheets.destination`) can never be mistaken for the delimiter.
+- `io.kestra.plugin.fivetran.connectors.Sync`: triggers a connector sync and optionally waits for completion. Returns the connector id and, when it waited, the `succeededAt` of the sync it observed. Emits lineage when `assets.enableAuto` is set.
+- `io.kestra.plugin.fivetran.connectors.Status`: reads the current status of one or more connectors via a single GET per connector, without triggering a sync. Computes a `fresh` verdict per connector from `succeededAt`/`syncFrequency`/`freshnessBuffer`, and by default (`wait: true`) polls until every connector is fresh or fails fast on a paused/broken connector, up to `maxDuration`. Emits lineage when `assets.enableAuto` is set.
+
+### Asset lineage
+
+`AbstractFivetranConnection.emitAssets` is the one helper both tasks call, because a connector on Fivetran's own schedule is never triggered through `Sync` and one driven from Kestra is often never read through `Status`. Either task alone leaves half the graph empty.
+
+Per connector it emits:
+
+- One **table-grain** asset per synced table, id `database.schema.name`, metadata `system`/`database`/`schema`/`name`/`connectorId`. This is the same id convention plugin-dbt emits (`ResultParser.assetIdFor`), so a Fivetran-loaded table and the dbt model reading it resolve to a single node and the edge forms with no manual mapping. `database` comes from `GET /v2/destinations/{group_id}` (`config.database`, falling back to `catalog` then `project_id`), never from the group id: a group id is a Fivetran-internal identifier, not a warehouse database, so an id built on it would be table-grain but still in the wrong namespace. Tables come from `GET /v2/connectors/{id}/schemas`, using `name_in_destination` and skipping disabled schemas and tables.
+- One **connector-grain** asset, id still `groupId.schema` (falling back to `connectorId.schema` when `groupId` is absent), so upgrading renames nothing and connector-level freshness keeps somewhere to live.
+
+Both reads are skipped entirely when `assets.enableAuto` is off, and destinations are resolved once per group id per run. A failed destination or schema read warns and leaves the connector asset in place: lineage is metadata about the run, so it must never fail a sync that succeeded.
+
+Each id segment is sanitized on its own before being joined with `.`, so a `.` inside a raw segment (e.g. schema `google_sheets.destination`) can never be mistaken for the delimiter.
 
 ### Project Structure
 

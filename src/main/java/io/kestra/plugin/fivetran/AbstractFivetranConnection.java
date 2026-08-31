@@ -7,6 +7,11 @@ import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 import org.apache.hc.core5.http.Method;
 
@@ -24,13 +29,23 @@ import io.kestra.core.http.client.HttpClientResponseException;
 import io.kestra.core.http.client.configurations.BasicAuthConfiguration;
 import io.kestra.core.http.client.configurations.HttpConfiguration;
 import io.kestra.core.models.annotations.PluginProperty;
+import io.kestra.core.models.assets.Asset;
+import io.kestra.core.models.assets.AssetsDeclaration;
+import io.kestra.core.models.assets.Custom;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.Task;
 import io.kestra.core.models.tasks.retrys.Exponential;
+import io.kestra.core.queues.QueueException;
+import io.kestra.core.runners.AssetEmit;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.utils.RetryUtils;
 import io.kestra.plugin.fivetran.models.Connector;
 import io.kestra.plugin.fivetran.models.ConnectorResponse;
+import io.kestra.plugin.fivetran.models.ConnectorSchema;
+import io.kestra.plugin.fivetran.models.ConnectorSchemasResponse;
+import io.kestra.plugin.fivetran.models.Destination;
+import io.kestra.plugin.fivetran.models.DestinationResponse;
+import io.kestra.plugin.fivetran.models.SchemaTable;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.Min;
@@ -53,6 +68,11 @@ public abstract class AbstractFivetranConnection extends Task {
     private static final int SERVER_ERROR_MAX = 599;
     // Upper bound on how far to walk the exception cause chain, so a cyclic chain cannot loop forever.
     private static final int MAX_CAUSE_CHAIN_DEPTH = 16;
+
+    protected static final String TABLE_ASSET_TYPE = "io.kestra.plugin.ee.assets.Table";
+    private static final String ASSET_SYSTEM = "fivetran";
+    // Asset ids are constrained to 150 characters by the core Asset contract.
+    private static final int MAX_ASSET_ID_LENGTH = 150;
 
     @Schema(
         title = "Fivetran API key",
@@ -180,7 +200,7 @@ public abstract class AbstractFivetranConnection extends Task {
             .uri(
                 URI.create(
                     runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
-                        "/v2/connectors/" + encodeConnectorId(connectorId)
+                        "/v2/connectors/" + encodePathSegment(connectorId)
                 )
             )
             .method("GET");
@@ -191,13 +211,13 @@ public abstract class AbstractFivetranConnection extends Task {
     }
 
     /**
-     * URL-encodes a connector ID before it is interpolated into a Fivetran API path, so reserved URL
-     * characters cannot alter the request path. Shared by the GET status read and the POST sync trigger.
-     * {@link URLEncoder} uses form-encoding, which emits {@code +} for a space, so it is corrected to the
-     * path-segment {@code %20}.
+     * URL-encodes a connector or destination ID before it is interpolated into a Fivetran API path, so
+     * reserved URL characters cannot alter the request path. Shared by the GET status read, the POST sync
+     * trigger, and the two lineage reads. {@link URLEncoder} uses form-encoding, which emits {@code +} for
+     * a space, so it is corrected to the path-segment {@code %20}.
      */
-    protected static String encodeConnectorId(String connectorId) {
-        return URLEncoder.encode(connectorId, StandardCharsets.UTF_8).replace("+", "%20");
+    protected static String encodePathSegment(String segment) {
+        return URLEncoder.encode(segment, StandardCharsets.UTF_8).replace("+", "%20");
     }
 
     /**
@@ -233,5 +253,262 @@ public abstract class AbstractFivetranConnection extends Task {
     // not safe to retry blindly here, so they are treated as write methods.
     private static boolean isReadOnlyMethod(String method) {
         return Method.GET.isSame(method) || Method.HEAD.isSame(method);
+    }
+
+    /**
+     * Reads a connector's schema config, i.e. which schemas and tables it writes into the destination.
+     *
+     * @param runContext The run context used to render properties and build the HTTP client.
+     * @param connectorId The already-rendered Fivetran connector ID.
+     * @return Schemas keyed by their source-side name, empty when Fivetran reports none.
+     */
+    protected Map<String, ConnectorSchema> fetchConnectorSchemas(RunContext runContext, String connectorId)
+        throws IllegalVariableEvaluationException, HttpClientException {
+        HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
+            .uri(
+                URI.create(
+                    runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
+                        "/v2/connectors/" + encodePathSegment(connectorId) + "/schemas"
+                )
+            )
+            .method("GET");
+
+        HttpResponse<ConnectorSchemasResponse> response = this.request(runContext, requestBuilder, ConnectorSchemasResponse.class);
+
+        ConnectorSchemasResponse body = response.getBody();
+        if (body == null || body.getData() == null || body.getData().getSchemas() == null) {
+            return Map.of();
+        }
+        return body.getData().getSchemas();
+    }
+
+    /**
+     * Reads a destination, whose config carries the warehouse database name behind a Fivetran group ID.
+     *
+     * @param runContext The run context used to render properties and build the HTTP client.
+     * @param groupId The Fivetran group (destination) ID taken from the connector.
+     * @return The destination as returned by the Fivetran API, null when the body carries no data.
+     */
+    protected Destination fetchDestination(RunContext runContext, String groupId)
+        throws IllegalVariableEvaluationException, HttpClientException {
+        HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
+            .uri(
+                URI.create(
+                    runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
+                        "/v2/destinations/" + encodePathSegment(groupId)
+                )
+            )
+            .method("GET");
+
+        HttpResponse<DestinationResponse> response = this.request(runContext, requestBuilder, DestinationResponse.class);
+
+        return response.getBody() != null ? response.getBody().getData() : null;
+    }
+
+    /**
+     * Whether automatic asset emission is enabled on this task. Checked before any lineage read so a task
+     * with assets off never pays for the extra destination and schema calls.
+     */
+    protected boolean assetsEnabled(RunContext runContext) throws IllegalVariableEvaluationException {
+        AssetsDeclaration declaration = this.getAssets();
+        return declaration != null
+            && runContext.render(declaration.getEnableAuto()).as(Boolean.class).orElse(false);
+    }
+
+    /**
+     * Emits lineage for the given connectors: one table-grain asset per synced table, plus the
+     * connector-grain asset carrying the sync state. Shared by {@code Sync} and {@code Status}, because a
+     * connector on Fivetran's own schedule is never triggered through {@code Sync} and one driven from
+     * Kestra is often never read through {@code Status}, so either task alone leaves half the graph empty.
+     * <p>
+     * Table ids are composed as {@code database.schema.name}, the same convention plugin-dbt emits, so a
+     * Fivetran-loaded table and the dbt model reading it resolve to one node and the edge forms with no
+     * manual mapping. {@code database} comes from the destination rather than the group ID: a group ID is
+     * a Fivetran-internal identifier, not a warehouse database, so an id built on it would be table-grain
+     * but still in the wrong namespace.
+     *
+     * @param runContext The run context used to render properties and emit assets.
+     * @param connectors Connectors keyed by the ID they were requested with.
+     * @param syncStates Optional sync state per connector ID, recorded on the connector-grain asset.
+     */
+    protected void emitAssets(RunContext runContext, Map<String, Connector> connectors, Map<String, String> syncStates)
+        throws IllegalVariableEvaluationException {
+        if (connectors == null || connectors.isEmpty() || !assetsEnabled(runContext)) {
+            return;
+        }
+
+        // Several connectors usually share one destination, so the database is resolved once per group ID.
+        // Misses are cached too, so a destination that reports no database is not re-read per connector.
+        Map<String, String> databaseByGroup = new HashMap<>();
+
+        for (Map.Entry<String, Connector> entry : connectors.entrySet()) {
+            String connectorId = entry.getKey();
+            Connector connector = entry.getValue();
+            if (connector == null) {
+                continue;
+            }
+
+            List<Asset> assets = new ArrayList<>();
+            assets.add(connectorAsset(connectorId, connector, syncStates == null ? null : syncStates.get(connectorId)));
+            assets.addAll(tableAssets(runContext, connectorId, connector, databaseByGroup));
+
+            try {
+                runContext.assets().emit(new AssetEmit(List.of(), assets));
+            } catch (UnsupportedOperationException e) {
+                // OSS edition or tests where EE assets are not available — silently skip.
+                runContext.logger().debug("Asset emission is not supported in this edition, skipping.");
+                return;
+            } catch (QueueException e) {
+                runContext.logger().warn("Unable to emit fivetran asset for connector '{}'", connectorId, e);
+            }
+        }
+    }
+
+    /**
+     * The connector-grain asset, kept alongside the table-grain ones because a connector's freshness and
+     * sync state have no table-level equivalent. Its id stays {@code groupId.schema} so upgrading the
+     * plugin does not rename assets that already exist.
+     */
+    private static Asset connectorAsset(String connectorId, Connector connector, String syncState) {
+        String schema = connector.destinationSchemaName();
+
+        Map<String, Object> metadata = new LinkedHashMap<>();
+        metadata.put("system", ASSET_SYSTEM);
+        metadata.put("connectorId", connectorId);
+        metadata.put("schema", schema);
+        if (syncState != null) {
+            metadata.put("syncState", syncState);
+        }
+
+        return Custom.builder()
+            .id(sanitizeAssetId(composeConnectorAssetId(connectorId, connector, schema)))
+            .type(TABLE_ASSET_TYPE)
+            .metadata(metadata)
+            .build();
+    }
+
+    /**
+     * One asset per table the connector writes, id {@code database.schema.name}. Returns empty rather than
+     * throwing when the database or the schema config cannot be read: lineage is metadata about the run,
+     * never the run itself, so a lineage read failure must not fail a sync that actually succeeded.
+     */
+    private List<Asset> tableAssets(RunContext runContext, String connectorId, Connector connector, Map<String, String> databaseByGroup) {
+        String database = resolveDatabase(runContext, connector, databaseByGroup);
+        if (database == null) {
+            runContext.logger().debug(
+                "No destination database resolved for connector '{}', emitting the connector asset only.",
+                connectorId
+            );
+            return List.of();
+        }
+
+        Map<String, ConnectorSchema> schemas;
+        try {
+            schemas = fetchConnectorSchemas(runContext, connectorId);
+        } catch (Exception e) {
+            runContext.logger().warn(
+                "Could not read the schema config of connector '{}', emitting the connector asset only: {}",
+                connectorId,
+                e.getMessage()
+            );
+            return List.of();
+        }
+
+        List<Asset> assets = new ArrayList<>();
+        for (Map.Entry<String, ConnectorSchema> schemaEntry : schemas.entrySet()) {
+            ConnectorSchema schema = schemaEntry.getValue();
+            // A disabled schema or table is not written to the destination, so it is not an asset.
+            if (schema == null || !schema.isEnabled() || schema.getTables() == null) {
+                continue;
+            }
+            String schemaName = schema.destinationName(schemaEntry.getKey());
+
+            for (Map.Entry<String, SchemaTable> tableEntry : schema.getTables().entrySet()) {
+                SchemaTable table = tableEntry.getValue();
+                if (table == null || !table.isEnabled()) {
+                    continue;
+                }
+                String tableName = table.destinationName(tableEntry.getKey());
+
+                Map<String, Object> metadata = new LinkedHashMap<>();
+                metadata.put("system", ASSET_SYSTEM);
+                metadata.put("database", database);
+                metadata.put("schema", schemaName);
+                metadata.put("name", tableName);
+                metadata.put("connectorId", connectorId);
+
+                assets.add(
+                    Custom.builder()
+                        .id(sanitizeAssetId(joinSegments(database, schemaName, tableName)))
+                        .type(TABLE_ASSET_TYPE)
+                        .metadata(metadata)
+                        .build()
+                );
+            }
+        }
+
+        return assets;
+    }
+
+    /**
+     * The destination database behind a connector's group ID, or null when it cannot be read. Cached per
+     * group ID by the caller, misses included, so N connectors on one destination cost one lookup.
+     */
+    private String resolveDatabase(RunContext runContext, Connector connector, Map<String, String> databaseByGroup) {
+        String groupId = connector.getGroupId();
+        if (groupId == null || groupId.isBlank()) {
+            return null;
+        }
+        if (databaseByGroup.containsKey(groupId)) {
+            return databaseByGroup.get(groupId);
+        }
+
+        String database = null;
+        try {
+            Destination destination = fetchDestination(runContext, groupId);
+            database = destination != null ? destination.databaseName() : null;
+        } catch (Exception e) {
+            runContext.logger().warn("Could not read destination '{}': {}", groupId, e.getMessage());
+        }
+
+        databaseByGroup.put(groupId, database);
+        return database;
+    }
+
+    // groupId scopes the schema to the connector's destination so two connectors landing in the same schema
+    // (e.g. shared across groups) still get distinct asset ids; connectorId is the fallback when groupId is absent.
+    private static String composeConnectorAssetId(String connectorId, Connector connector, String schema) {
+        String prefix = connector.getGroupId() != null ? connector.getGroupId() : connectorId;
+        return schema != null
+            ? joinSegments(prefix, schema)
+            : joinSegments(connectorId);
+    }
+
+    // Sanitize each segment before joining so "." only ever appears as the delimiter: a raw segment can
+    // contain "." (e.g. schema "google_sheets.destination"), which would otherwise make the id ambiguous.
+    private static String joinSegments(String... segments) {
+        StringBuilder id = new StringBuilder();
+        for (String segment : segments) {
+            if (!id.isEmpty()) {
+                id.append('.');
+            }
+            id.append(sanitizeSegment(segment));
+        }
+        return id.toString();
+    }
+
+    static String sanitizeSegment(String segment) {
+        return segment.replaceAll("[^a-zA-Z0-9_:-]", "_");
+    }
+
+    // Enforce the rest of Asset's id contract (^[a-zA-Z0-9]..., size 1-150) that per-segment sanitization
+    // leaves: trim leading non-alphanumerics, fall back to a placeholder if that empties the id (e.g. "___"),
+    // and cap the length.
+    static String sanitizeAssetId(String rawId) {
+        String sanitized = rawId.replaceFirst("^[^a-zA-Z0-9]+", "");
+        if (sanitized.isEmpty()) {
+            sanitized = "connector";
+        }
+        return sanitized.length() > MAX_ASSET_ID_LENGTH ? sanitized.substring(0, MAX_ASSET_ID_LENGTH) : sanitized;
     }
 }

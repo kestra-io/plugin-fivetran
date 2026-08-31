@@ -19,11 +19,11 @@ import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.RunnableTask;
-import io.kestra.core.models.tasks.VoidOutput;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.utils.Await;
 import io.kestra.plugin.fivetran.AbstractFivetranConnection;
 import io.kestra.plugin.fivetran.models.Connector;
+import io.kestra.plugin.fivetran.models.ConnectorStatusResponse;
 import io.kestra.plugin.fivetran.models.SyncResponse;
 
 import io.swagger.v3.oas.annotations.media.Schema;
@@ -40,7 +40,7 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 @NoArgsConstructor
 @Schema(
     title = "Trigger and optionally watch connector sync",
-    description = "Starts a Fivetran connector sync through the Fivetran API. Can force-cancel and restart an in-progress sync. Waits for completion by default (up to 60 minutes) and fails if the connector reports a failure."
+    description = "Starts a Fivetran connector sync through the Fivetran API. Can force-cancel and restart an in-progress sync. Waits for completion by default (up to 60 minutes) and fails if the connector reports a failure. With `assets.enableAuto` set, emits one asset per table the connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph."
 )
 @Plugin(
     examples = {
@@ -57,10 +57,27 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
                     apiSecret: "{{ secret('FIVETRAN_API_SECRET') }}"
                     connectorId: "connector_id"
                 """
+        ),
+        @Example(
+            full = true,
+            title = "Sync a connector and emit one lineage asset per table it writes.",
+            code = """
+                id: fivetran_sync_with_assets
+                namespace: company.team
+
+                tasks:
+                  - id: sync
+                    type: io.kestra.plugin.fivetran.connectors.Sync
+                    apiKey: "{{ secret('FIVETRAN_API_KEY') }}"
+                    apiSecret: "{{ secret('FIVETRAN_API_SECRET') }}"
+                    connectorId: "connector_id"
+                    assets:
+                      enableAuto: true
+                """
         )
     }
 )
-public class Sync extends AbstractFivetranConnection implements RunnableTask<VoidOutput> {
+public class Sync extends AbstractFivetranConnection implements RunnableTask<Sync.Output> {
     @Schema(
         title = "Connector ID",
         description = "Identifier of the Fivetran connector to sync."
@@ -103,7 +120,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
     private transient Map<Integer, Integer> loggedLine = new HashMap<>();
 
     @Override
-    public VoidOutput run(RunContext runContext) throws Exception {
+    public Output run(RunContext runContext) throws Exception {
         Logger logger = runContext.logger();
         String connectorId = runContext.render(this.connectorId).as(String.class).orElseThrow();
 
@@ -118,7 +135,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
             .uri(
                 URI.create(
                     runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
-                        "/v2/connectors/" + encodeConnectorId(connectorId) + "/sync"
+                        "/v2/connectors/" + encodePathSegment(connectorId) + "/sync"
                 )
             )
             .method("POST")
@@ -137,7 +154,8 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
         logger.info("Job status {} with response: {}", syncHttpResponse.getStatus(), syncResponse);
 
         if (!runContext.render(this.wait).as(Boolean.class).orElseThrow()) {
-            return null;
+            emitAssets(runContext, connectorId, previousConnector);
+            return Output.builder().connectorId(connectorId).build();
         }
 
         ZonedDateTime previousCompletedDate = previousConnector.completedDate();
@@ -189,7 +207,22 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
             throw new Exception("Connector '" + connectorId + "' failed: " + finalConnector);
         }
 
-        return null;
+        emitAssets(runContext, connectorId, finalConnector);
+
+        return Output.builder()
+            .connectorId(connectorId)
+            .succeededAt(finalConnector.getSucceededAt())
+            .build();
+    }
+
+    // Single-connector view of the shared lineage helper.
+    private void emitAssets(RunContext runContext, String connectorId, Connector connector)
+        throws IllegalVariableEvaluationException {
+        ConnectorStatusResponse status = connector.getStatus();
+        Map<String, String> syncStates = new HashMap<>();
+        syncStates.put(connectorId, status != null ? status.getSyncState() : null);
+
+        this.emitAssets(runContext, Map.of(connectorId, connector), syncStates);
     }
 
     /**
@@ -205,4 +238,19 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Voi
         return this.fetchConnector(runContext, connectorId);
     }
 
+    @Builder
+    @Getter
+    public static class Output implements io.kestra.core.models.tasks.Output {
+        @Schema(
+            title = "Connector ID",
+            description = "The connector this task synced."
+        )
+        String connectorId;
+
+        @Schema(
+            title = "Timestamp of the sync this task waited for",
+            description = "Null when `wait` is false, since the sync is still running on Fivetran when the task returns."
+        )
+        ZonedDateTime succeededAt;
+    }
 }
