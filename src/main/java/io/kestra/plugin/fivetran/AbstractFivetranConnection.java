@@ -12,6 +12,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import org.apache.hc.core5.http.Method;
 
@@ -70,6 +71,11 @@ public abstract class AbstractFivetranConnection extends Task {
     private static final int MAX_CAUSE_CHAIN_DEPTH = 16;
 
     private static final String DEFAULT_BASE_URL = "https://api.fivetran.com";
+
+    // Compiled once: sanitizeSegment runs three times per emitted table, so a connector with hundreds of
+    // tables would otherwise recompile these on every segment of every id.
+    private static final Pattern DISALLOWED_ID_CHARS = Pattern.compile("[^a-zA-Z0-9_-]");
+    private static final Pattern LEADING_NON_ALPHANUMERIC = Pattern.compile("^[^a-zA-Z0-9]+");
 
     protected static final String TABLE_ASSET_TYPE = "io.kestra.plugin.ee.assets.Table";
     private static final String ASSET_SYSTEM = "fivetran";
@@ -348,7 +354,7 @@ public abstract class AbstractFivetranConnection extends Task {
             // `enableAuto` is a Property, so it can be an expression that fails to render. Rendering happens
             // after the sync has already succeeded, and lineage is metadata about the run rather than the run
             // itself, so a gate that cannot be read skips lineage instead of failing the task.
-            runContext.logger().warn("Could not read assets.enableAuto, skipping lineage: {}", e.getMessage());
+            runContext.logger().warn("Could not read assets.enableAuto, skipping lineage.", e);
             return;
         }
 
@@ -544,14 +550,14 @@ public abstract class AbstractFivetranConnection extends Task {
     // ^[a-zA-Z0-9][a-zA-Z0-9._-]* and rejects ':', which a later core added. Anything outside that set
     // becomes '_' rather than emit an id the framework declares invalid.
     static String sanitizeSegment(String segment) {
-        return segment.replaceAll("[^a-zA-Z0-9_-]", "_");
+        return DISALLOWED_ID_CHARS.matcher(segment).replaceAll("_");
     }
 
     // Enforce the rest of Asset's id contract (^[a-zA-Z0-9]..., size 1-150) that per-segment sanitization
     // leaves: trim leading non-alphanumerics, fall back to a placeholder if that empties the id (e.g. "___"),
     // and cap the length.
     static String sanitizeAssetId(String rawId) {
-        String sanitized = rawId.replaceFirst("^[^a-zA-Z0-9]+", "");
+        String sanitized = LEADING_NON_ALPHANUMERIC.matcher(rawId).replaceFirst("");
         if (sanitized.isEmpty()) {
             sanitized = "connector";
         }
