@@ -409,8 +409,13 @@ public abstract class AbstractFivetranConnection extends Task {
         Destination destination = resolveDestination(runContext, connector, destinationByGroup);
         String database = destination != null ? destination.databaseName() : null;
         if (database == null) {
-            runContext.logger().debug(
-                "No destination database resolved for connector '{}', emitting the connector asset only.",
+            // Warn, not debug: this is the one line that explains why lineage produced nothing but a
+            // connector node, and an operator cannot diagnose that from a quiet log. Fivetran-managed
+            // destinations are the known case: Managed BigQuery reports only `data_set_location`, `bucket`
+            // and `support_json_type`, so no warehouse database name exists to read.
+            runContext.logger().warn(
+                "Destination '{}' reports no database name, so connector '{}' emits no table-level assets.",
+                connector.getGroupId(),
                 connectorId
             );
             return List.of();
