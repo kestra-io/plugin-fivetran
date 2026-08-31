@@ -60,4 +60,16 @@ class AbstractFivetranConnectionTest {
     void sanitizeAssetIdTrimsLeadingNonAlphanumerics() {
         assertThat(AbstractFivetranConnection.sanitizeAssetId("_analytics.schema.table"), startsWith("analytics"));
     }
+
+    @Test
+    @DisplayName("Should replace a colon, which the Asset id contract this plugin compiles against rejects")
+    void sanitizeSegmentReplacesColon() {
+        assertThat(AbstractFivetranConnection.sanitizeSegment("db:prod"), is("db_prod"));
+    }
+
+    @Test
+    @DisplayName("Should keep the characters the Asset id contract does allow")
+    void sanitizeSegmentKeepsAllowedCharacters() {
+        assertThat(AbstractFivetranConnection.sanitizeSegment("my_table-2"), is("my_table-2"));
+    }
 }

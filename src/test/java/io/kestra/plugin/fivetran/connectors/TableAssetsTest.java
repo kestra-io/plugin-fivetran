@@ -469,6 +469,23 @@ class TableAssetsTest {
         assertThat(assets.get(1).getMetadata().get("system"), is("fivetran"));
     }
 
+    @Test
+    @DisplayName("Should fall back to catalog on a Databricks destination, which reports no database")
+    void resolvesDatabricksCatalogAsTheDatabase(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubConnector(wmRuntimeInfo);
+        stubDestination("""
+            {"catalog": "acme_catalog", "server_hostname": "acme.cloud.databricks.com"}
+            """);
+        stubSchemas("""
+            {"salesforce": {"name_in_destination": "salesforce", "enabled": true, "tables": {"account": {"enabled": true}}}}
+            """);
+
+        Status task = statusTask(wmRuntimeInfo, true);
+        task.run(runContextFactory.of(task, Map.of()));
+
+        assertThat(ids(emittedAssets()), contains(GROUP_ID + "." + SCHEMA, "acme_catalog.salesforce.account"));
+    }
+
     private Status statusTask(WireMockRuntimeInfo wmRuntimeInfo, boolean assetsEnabled) {
         Status.StatusBuilder<?, ?> builder = Status.builder()
             .id("status")

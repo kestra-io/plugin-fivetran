@@ -69,6 +69,8 @@ public abstract class AbstractFivetranConnection extends Task {
     // Upper bound on how far to walk the exception cause chain, so a cyclic chain cannot loop forever.
     private static final int MAX_CAUSE_CHAIN_DEPTH = 16;
 
+    private static final String DEFAULT_BASE_URL = "https://api.fivetran.com";
+
     protected static final String TABLE_ASSET_TYPE = "io.kestra.plugin.ee.assets.Table";
     private static final String ASSET_SYSTEM = "fivetran";
     // Asset ids are constrained to 150 characters by the core Asset contract.
@@ -98,7 +100,7 @@ public abstract class AbstractFivetranConnection extends Task {
     )
     @NotNull
     @Builder.Default
-    Property<String> baseUrl = Property.ofValue("https://api.fivetran.com");
+    Property<String> baseUrl = Property.ofValue(DEFAULT_BASE_URL);
 
     @Schema(
         title = "HTTP client options",
@@ -199,8 +201,7 @@ public abstract class AbstractFivetranConnection extends Task {
         HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
             .uri(
                 URI.create(
-                    runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
-                        "/v2/connectors/" + encodePathSegment(connectorId)
+                    rBaseUrl(runContext) + "/v2/connectors/" + encodePathSegment(connectorId)
                 )
             )
             .method("GET");
@@ -216,6 +217,11 @@ public abstract class AbstractFivetranConnection extends Task {
      * trigger, and the two lineage reads. {@link URLEncoder} uses form-encoding, which emits {@code +} for
      * a space, so it is corrected to the path-segment {@code %20}.
      */
+    // baseUrl carries a @Builder.Default, so it renders with that default rather than throwing.
+    protected String rBaseUrl(RunContext runContext) throws IllegalVariableEvaluationException {
+        return runContext.render(this.getBaseUrl()).as(String.class).orElse(DEFAULT_BASE_URL);
+    }
+
     protected static String encodePathSegment(String segment) {
         return URLEncoder.encode(segment, StandardCharsets.UTF_8).replace("+", "%20");
     }
@@ -267,8 +273,7 @@ public abstract class AbstractFivetranConnection extends Task {
         HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
             .uri(
                 URI.create(
-                    runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
-                        "/v2/connectors/" + encodePathSegment(connectorId) + "/schemas"
+                    rBaseUrl(runContext) + "/v2/connectors/" + encodePathSegment(connectorId) + "/schemas"
                 )
             )
             .method("GET");
@@ -294,8 +299,7 @@ public abstract class AbstractFivetranConnection extends Task {
         HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
             .uri(
                 URI.create(
-                    runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
-                        "/v2/destinations/" + encodePathSegment(groupId)
+                    rBaseUrl(runContext) + "/v2/destinations/" + encodePathSegment(groupId)
                 )
             )
             .method("GET");
@@ -426,9 +430,9 @@ public abstract class AbstractFivetranConnection extends Task {
             schemas = fetchConnectorSchemas(runContext, connectorId);
         } catch (Exception e) {
             runContext.logger().warn(
-                "Could not read the schema config of connector '{}', emitting the connector asset only: {}",
+                "Could not read the schema config of connector '{}', emitting the connector asset only.",
                 connectorId,
-                e.getMessage()
+                e
             );
             return List.of();
         }
@@ -536,8 +540,11 @@ public abstract class AbstractFivetranConnection extends Task {
         return id.toString();
     }
 
+    // Kept in step with the narrowest Asset.id contract this plugin compiles against: core 1.3.13 allows
+    // ^[a-zA-Z0-9][a-zA-Z0-9._-]* and rejects ':', which a later core added. Anything outside that set
+    // becomes '_' rather than emit an id the framework declares invalid.
     static String sanitizeSegment(String segment) {
-        return segment.replaceAll("[^a-zA-Z0-9_:-]", "_");
+        return segment.replaceAll("[^a-zA-Z0-9_-]", "_");
     }
 
     // Enforce the rest of Asset's id contract (^[a-zA-Z0-9]..., size 1-150) that per-segment sanitization

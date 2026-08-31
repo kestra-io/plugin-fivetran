@@ -134,8 +134,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
             .uri(
                 URI.create(
-                    runContext.render(this.getBaseUrl()).as(String.class).orElseThrow() +
-                        "/v2/connectors/" + encodePathSegment(connectorId) + "/sync"
+                    rBaseUrl(runContext) + "/v2/connectors/" + encodePathSegment(connectorId) + "/sync"
                 )
             )
             .method("POST")

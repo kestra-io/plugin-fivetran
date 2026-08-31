@@ -37,7 +37,7 @@ Both reads are skipped entirely when `assets.enableAuto` is off, and destination
 
 Ids over the core 150-character cap get a digest suffix rather than plain truncation. The table name is the last segment, so cutting the tail would land every table of one schema on the same id and silently collapse them into a single node.
 
-Each id segment is sanitized on its own before being joined with `.`, so a `.` inside a raw segment (e.g. schema `google_sheets.destination`) can never be mistaken for the delimiter.
+Each id segment is sanitized on its own before being joined with `.`, so a `.` inside a raw segment (e.g. schema `google_sheets.destination`) can never be mistaken for the delimiter. The allowed set tracks the narrowest `Asset.id` contract the plugin compiles against: core 1.3.13 permits `^[a-zA-Z0-9][a-zA-Z0-9._-]*` and rejects `:`, which a later core added, so `:` is replaced rather than passed through.
 
 ### Project Structure
 
