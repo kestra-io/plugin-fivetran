@@ -95,7 +95,7 @@ class TableAssetsTest {
 
         Asset account = assets.get(1);
         assertThat(account.getType(), is("io.kestra.plugin.ee.assets.Table"));
-        assertThat(account.getMetadata().get("system"), is("fivetran"));
+        assertThat(account.getMetadata().get("system"), is("snowflake"));
         assertThat(account.getMetadata().get("database"), is("analytics"));
         assertThat(account.getMetadata().get("schema"), is("salesforce"));
         assertThat(account.getMetadata().get("name"), is("account"));
@@ -359,6 +359,80 @@ class TableAssetsTest {
         assertThat(output.getConnectorId(), is(CONNECTOR_ID));
         // The sync is still running on Fivetran, so there is no completion time to report.
         assertThat(output.getSucceededAt(), nullValue());
+    }
+
+    @Test
+    @DisplayName("Should not fail an otherwise-successful run when assets.enableAuto cannot be rendered")
+    void anUnreadableAssetGateSkipsLineageRatherThanFailingTheTask(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubConnector(wmRuntimeInfo);
+
+        Status task = Status.builder()
+            .id("status")
+            .type(Status.class.getName())
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .connectorIds(Property.ofValue(List.of(CONNECTOR_ID)))
+            .wait(Property.ofValue(false))
+            .assets(new AssetsDeclaration(Property.<Boolean> ofExpression("{{ missing.variable }}"), null, null))
+            .build();
+
+        // The status read itself succeeded, so an unreadable lineage gate must not turn the task red.
+        Status.Output output = task.run(runContextFactory.of(task, Map.of()));
+
+        assertThat(output.getConnectors().get(CONNECTOR_ID).getFresh(), is(true));
+        assertThat(assetManagerFactory.allEmitted(), hasSize(0));
+    }
+
+    @Test
+    @DisplayName("Should keep the connector asset when the destination read fails outright")
+    void degradesToTheConnectorAssetWhenTheDestinationReadFails(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubConnector(wmRuntimeInfo);
+        stubFor(
+            get(urlEqualTo("/v2/destinations/" + GROUP_ID))
+                .willReturn(aResponse().withStatus(500).withHeader("Content-Type", "application/json").withBody("{}"))
+        );
+
+        Status task = statusTask(wmRuntimeInfo, true);
+        task.run(runContextFactory.of(task, Map.of()));
+
+        assertThat(ids(emittedAssets()), contains(GROUP_ID + "." + SCHEMA));
+    }
+
+    @Test
+    @DisplayName("Should emit table assets from Sync even when it does not wait for the sync to finish")
+    void syncWithoutWaitStillEmitsTableAssets(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID))
+                .willReturn(json(connectorBody(CONNECTOR_ID, SCHEMA, "2026-08-30T10:00:00.000Z")))
+        );
+        stubFor(
+            post(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync"))
+                .willReturn(json("""
+                    {"code": "Success", "message": "Sync has been successfully triggered"}
+                    """))
+        );
+        stubDestination("""
+            {"database": "analytics"}
+            """);
+        stubSchemas("""
+            {"salesforce": {"name_in_destination": "salesforce", "enabled": true, "tables": {"account": {"enabled": true}}}}
+            """);
+
+        Sync task = Sync.builder()
+            .id("sync")
+            .type(Sync.class.getName())
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .connectorId(Property.ofValue(CONNECTOR_ID))
+            .wait(Property.ofValue(false))
+            .assets(new AssetsDeclaration(true, List.of(), List.of()))
+            .build();
+
+        task.run(runContextFactory.of(task, Map.of()));
+
+        assertThat(ids(emittedAssets()), contains(GROUP_ID + "." + SCHEMA, "analytics.salesforce.account"));
     }
 
     private Status statusTask(WireMockRuntimeInfo wmRuntimeInfo, boolean assetsEnabled) {

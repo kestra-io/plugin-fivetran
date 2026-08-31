@@ -216,8 +216,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
     }
 
     // Single-connector view of the shared lineage helper.
-    private void emitAssets(RunContext runContext, String connectorId, Connector connector)
-        throws IllegalVariableEvaluationException {
+    private void emitAssets(RunContext runContext, String connectorId, Connector connector) {
         ConnectorStatusResponse status = connector.getStatus();
         Map<String, String> syncStates = new HashMap<>();
         syncStates.put(connectorId, status != null ? status.getSyncState() : null);

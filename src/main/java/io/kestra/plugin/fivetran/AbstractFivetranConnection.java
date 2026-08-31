@@ -331,15 +331,26 @@ public abstract class AbstractFivetranConnection extends Task {
      * @param connectors Connectors keyed by the ID they were requested with.
      * @param syncStates Optional sync state per connector ID, recorded on the connector-grain asset.
      */
-    protected void emitAssets(RunContext runContext, Map<String, Connector> connectors, Map<String, String> syncStates)
-        throws IllegalVariableEvaluationException {
-        if (connectors == null || connectors.isEmpty() || !assetsEnabled(runContext)) {
+    protected void emitAssets(RunContext runContext, Map<String, Connector> connectors, Map<String, String> syncStates) {
+        if (connectors == null || connectors.isEmpty()) {
             return;
         }
 
-        // Several connectors usually share one destination, so the database is resolved once per group ID.
-        // Misses are cached too, so a destination that reports no database is not re-read per connector.
-        Map<String, String> databaseByGroup = new HashMap<>();
+        try {
+            if (!assetsEnabled(runContext)) {
+                return;
+            }
+        } catch (Exception e) {
+            // `enableAuto` is a Property, so it can be an expression that fails to render. Rendering happens
+            // after the sync has already succeeded, and lineage is metadata about the run rather than the run
+            // itself, so a gate that cannot be read skips lineage instead of failing the task.
+            runContext.logger().warn("Could not read assets.enableAuto, skipping lineage: {}", e.getMessage());
+            return;
+        }
+
+        // Several connectors usually share one destination, so it is resolved once per group ID. Misses are
+        // cached too, so a destination that cannot be read is not re-requested per connector.
+        Map<String, Destination> destinationByGroup = new HashMap<>();
 
         for (Map.Entry<String, Connector> entry : connectors.entrySet()) {
             String connectorId = entry.getKey();
@@ -350,15 +361,17 @@ public abstract class AbstractFivetranConnection extends Task {
 
             List<Asset> assets = new ArrayList<>();
             assets.add(connectorAsset(connectorId, connector, syncStates == null ? null : syncStates.get(connectorId)));
-            assets.addAll(tableAssets(runContext, connectorId, connector, databaseByGroup));
+            assets.addAll(tableAssets(runContext, connectorId, connector, destinationByGroup));
 
             try {
                 runContext.assets().emit(new AssetEmit(List.of(), assets));
             } catch (UnsupportedOperationException e) {
-                // OSS edition or tests where EE assets are not available — silently skip.
+                // OSS edition or tests where EE assets are not available. Only emit() reveals this, so one
+                // connector's lineage reads are already spent by the time we find out; returning here keeps
+                // it to that one rather than repeating it per connector.
                 runContext.logger().debug("Asset emission is not supported in this edition, skipping.");
                 return;
-            } catch (QueueException e) {
+            } catch (QueueException | IllegalVariableEvaluationException e) {
                 runContext.logger().warn("Unable to emit fivetran asset for connector '{}'", connectorId, e);
             }
         }
@@ -392,8 +405,9 @@ public abstract class AbstractFivetranConnection extends Task {
      * throwing when the database or the schema config cannot be read: lineage is metadata about the run,
      * never the run itself, so a lineage read failure must not fail a sync that actually succeeded.
      */
-    private List<Asset> tableAssets(RunContext runContext, String connectorId, Connector connector, Map<String, String> databaseByGroup) {
-        String database = resolveDatabase(runContext, connector, databaseByGroup);
+    private List<Asset> tableAssets(RunContext runContext, String connectorId, Connector connector, Map<String, Destination> destinationByGroup) {
+        Destination destination = resolveDestination(runContext, connector, destinationByGroup);
+        String database = destination != null ? destination.databaseName() : null;
         if (database == null) {
             runContext.logger().debug(
                 "No destination database resolved for connector '{}', emitting the connector asset only.",
@@ -431,7 +445,10 @@ public abstract class AbstractFivetranConnection extends Task {
                 String tableName = table.destinationName(tableEntry.getKey());
 
                 Map<String, Object> metadata = new LinkedHashMap<>();
-                metadata.put("system", ASSET_SYSTEM);
+                // plugin-dbt sets `system` to the warehouse adapter, not to itself. Both plugins write this
+                // same asset id, so naming the warehouse here keeps the metadata stable whichever one wrote
+                // last; the Fivetran origin stays visible through `connectorId`.
+                metadata.put("system", destination.getService() != null ? destination.getService() : ASSET_SYSTEM);
                 metadata.put("database", database);
                 metadata.put("schema", schemaName);
                 metadata.put("name", tableName);
@@ -451,28 +468,30 @@ public abstract class AbstractFivetranConnection extends Task {
     }
 
     /**
-     * The destination database behind a connector's group ID, or null when it cannot be read. Cached per
-     * group ID by the caller, misses included, so N connectors on one destination cost one lookup.
+     * The destination behind a connector's group ID, or null when it cannot be read. Cached per group ID by
+     * the caller, misses included, so N connectors on one destination cost one lookup.
      */
-    private String resolveDatabase(RunContext runContext, Connector connector, Map<String, String> databaseByGroup) {
+    private Destination resolveDestination(RunContext runContext, Connector connector, Map<String, Destination> destinationByGroup) {
         String groupId = connector.getGroupId();
         if (groupId == null || groupId.isBlank()) {
             return null;
         }
-        if (databaseByGroup.containsKey(groupId)) {
-            return databaseByGroup.get(groupId);
+        if (destinationByGroup.containsKey(groupId)) {
+            return destinationByGroup.get(groupId);
         }
 
-        String database = null;
+        Destination destination = null;
         try {
-            Destination destination = fetchDestination(runContext, groupId);
-            database = destination != null ? destination.databaseName() : null;
+            destination = fetchDestination(runContext, groupId);
         } catch (Exception e) {
-            runContext.logger().warn("Could not read destination '{}': {}", groupId, e.getMessage());
+            // Deliberately not logging the exception message: this is the one Fivetran response that carries
+            // raw credentials (Snowflake `password`/`private_key`, BigQuery `secret_key`), and a parser error
+            // can quote the source it choked on.
+            runContext.logger().warn("Could not read destination '{}' ({})", groupId, e.getClass().getSimpleName());
         }
 
-        databaseByGroup.put(groupId, database);
-        return database;
+        destinationByGroup.put(groupId, destination);
+        return destination;
     }
 
     // groupId scopes the schema to the connector's destination so two connectors landing in the same schema
@@ -509,6 +528,15 @@ public abstract class AbstractFivetranConnection extends Task {
         if (sanitized.isEmpty()) {
             sanitized = "connector";
         }
-        return sanitized.length() > MAX_ASSET_ID_LENGTH ? sanitized.substring(0, MAX_ASSET_ID_LENGTH) : sanitized;
+        if (sanitized.length() <= MAX_ASSET_ID_LENGTH) {
+            return sanitized;
+        }
+
+        // The table name is the last segment, so plain truncation cuts the only part that differs between the
+        // tables of one schema: under a `database.schema.` prefix at the length cap every table would land on
+        // the same id and all but the last would silently vanish from the graph. A digest of the full id keeps
+        // them distinct. Not security-sensitive, it only has to separate ids sharing a 150-character prefix.
+        String suffix = "_" + String.format("%08x", sanitized.hashCode());
+        return sanitized.substring(0, MAX_ASSET_ID_LENGTH - suffix.length()) + suffix;
     }
 }
