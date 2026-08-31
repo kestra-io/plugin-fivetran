@@ -95,7 +95,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
 
     @Schema(
         title = "Wait for sync completion",
-        description = "When true (default), poll the connector until the sync finishes to capture status and logs. Set to false to return immediately after kickoff."
+        description = "When true (default), poll the connector until the sync finishes to capture status and logs. Set to false to return once the sync has been triggered, without waiting for it. `succeededAt` is then null, since the sync is still running on Fivetran. With `assets.enableAuto` set, lineage is still emitted in that case, which costs two extra reads before the task returns."
     )
     @Builder.Default
     Property<Boolean> wait = Property.ofValue(true);
