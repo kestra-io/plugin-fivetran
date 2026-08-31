@@ -393,7 +393,19 @@ class TableAssetsTest {
                 .willReturn(aResponse().withStatus(500).withHeader("Content-Type", "application/json").withBody("{}"))
         );
 
-        Status task = statusTask(wmRuntimeInfo, true);
+        // A 5xx on a GET is retriable, and this test only cares about the give-up branch, so the default
+        // 3 attempts with exponential backoff would just add seconds of sleep to the suite.
+        Status task = Status.builder()
+            .id("status")
+            .type(Status.class.getName())
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .connectorIds(Property.ofValue(List.of(CONNECTOR_ID)))
+            .wait(Property.ofValue(false))
+            .maxAttempts(Property.ofValue(1))
+            .assets(new AssetsDeclaration(true, List.of(), List.of()))
+            .build();
         task.run(runContextFactory.of(task, Map.of()));
 
         assertThat(ids(emittedAssets()), contains(GROUP_ID + "." + SCHEMA));
@@ -433,6 +445,28 @@ class TableAssetsTest {
         task.run(runContextFactory.of(task, Map.of()));
 
         assertThat(ids(emittedAssets()), contains(GROUP_ID + "." + SCHEMA, "analytics.salesforce.account"));
+    }
+
+    @Test
+    @DisplayName("Should fall back to naming this plugin when the destination reports no service")
+    void fallsBackToFivetranAsSystemWhenTheDestinationHasNoService(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubConnector(wmRuntimeInfo);
+        stubFor(
+            get(urlEqualTo("/v2/destinations/" + GROUP_ID))
+                .willReturn(json("""
+                    {"code": "Success", "data": {"id": "%s", "group_id": "%s", "config": {"database": "analytics"}}}
+                    """.formatted(GROUP_ID, GROUP_ID)))
+        );
+        stubSchemas("""
+            {"salesforce": {"name_in_destination": "salesforce", "enabled": true, "tables": {"account": {"enabled": true}}}}
+            """);
+
+        Status task = statusTask(wmRuntimeInfo, true);
+        task.run(runContextFactory.of(task, Map.of()));
+
+        List<Asset> assets = emittedAssets();
+        assertThat(ids(assets), contains(GROUP_ID + "." + SCHEMA, "analytics.salesforce.account"));
+        assertThat(assets.get(1).getMetadata().get("system"), is("fivetran"));
     }
 
     private Status statusTask(WireMockRuntimeInfo wmRuntimeInfo, boolean assetsEnabled) {

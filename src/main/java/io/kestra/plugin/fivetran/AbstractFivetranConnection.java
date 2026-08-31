@@ -446,8 +446,10 @@ public abstract class AbstractFivetranConnection extends Task {
 
                 Map<String, Object> metadata = new LinkedHashMap<>();
                 // plugin-dbt sets `system` to the warehouse adapter, not to itself. Both plugins write this
-                // same asset id, so naming the warehouse here keeps the metadata stable whichever one wrote
-                // last; the Fivetran origin stays visible through `connectorId`.
+                // same asset id, so naming the warehouse agrees with dbt for snowflake, databricks and
+                // redshift, where the two spellings are identical. They still differ on BigQuery, which
+                // Fivetran calls `big_query` and dbt calls `bigquery`, so the field can flip there. It is
+                // descriptive only, the id is what forms the edge. The Fivetran origin stays in `connectorId`.
                 metadata.put("system", destination.getService() != null ? destination.getService() : ASSET_SYSTEM);
                 metadata.put("database", database);
                 metadata.put("schema", schemaName);
