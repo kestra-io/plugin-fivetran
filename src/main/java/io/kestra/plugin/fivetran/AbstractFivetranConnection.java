@@ -434,6 +434,7 @@ public abstract class AbstractFivetranConnection extends Task {
         }
 
         List<Asset> assets = new ArrayList<>();
+        int enabledSchemas = 0;
         for (Map.Entry<String, ConnectorSchema> schemaEntry : schemas.entrySet()) {
             ConnectorSchema schema = schemaEntry.getValue();
             // A disabled schema or table is not written to the destination, so it is not an asset.
@@ -441,6 +442,7 @@ public abstract class AbstractFivetranConnection extends Task {
                 continue;
             }
             String schemaName = schema.destinationName(schemaEntry.getKey());
+            enabledSchemas++;
 
             for (Map.Entry<String, SchemaTable> tableEntry : schema.getTables().entrySet()) {
                 SchemaTable table = tableEntry.getValue();
@@ -470,6 +472,17 @@ public abstract class AbstractFivetranConnection extends Task {
                 );
             }
         }
+
+        // One line stating what lineage resolved, so an operator can tell a working run from a degraded one
+        // without turning on debug logging or reading the plugin source.
+        runContext.logger().info(
+            "Connector '{}': resolved database '{}', {} enabled schema(s) of {} reported, emitting {} table asset(s).",
+            connectorId,
+            database,
+            enabledSchemas,
+            schemas.size(),
+            assets.size()
+        );
 
         return assets;
     }
