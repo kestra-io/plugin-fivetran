@@ -436,7 +436,7 @@ class StatusTest {
 
         Asset asset = emitted.get(0).outputs().get(0);
         assertThat(asset.getId(), is(expectedAssetId));
-        assertThat(asset.getType(), is("io.kestra.plugin.ee.assets.Table"));
+        assertThat(asset.getType(), is("io.kestra.plugin.ee.assets.Dataset"));
         assertThat(asset.getMetadata().get("connectorId"), is(connectorId));
         assertThat(asset.getMetadata().get("schema"), is(schema));
     }

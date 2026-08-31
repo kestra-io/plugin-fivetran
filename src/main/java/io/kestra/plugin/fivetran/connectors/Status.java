@@ -16,12 +16,8 @@ import io.kestra.core.http.client.HttpClientException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
-import io.kestra.core.models.assets.Asset;
-import io.kestra.core.models.assets.Custom;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.RunnableTask;
-import io.kestra.core.queues.QueueException;
-import io.kestra.core.runners.AssetEmit;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.utils.Await;
 import io.kestra.plugin.fivetran.AbstractFivetranConnection;
@@ -42,7 +38,7 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 @NoArgsConstructor
 @Schema(
     title = "Read the status of one or more Fivetran connectors, optionally gating on freshness",
-    description = "Reads each connector's current status through a single GET call per connector. Never triggers a sync. By default (`wait: true`), polls until every connector is fresh so downstream tasks only run once the underlying data is up to date; set `wait: false` for a single read-only snapshot."
+    description = "Reads each connector's current status through a single GET call per connector. Never triggers a sync. By default (`wait: true`), polls until every connector is fresh so downstream tasks only run once the underlying data is up to date; set `wait: false` for a single read-only snapshot. With `assets.enableAuto` set, emits one asset per table each connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph."
 )
 @Plugin(
     examples = {
@@ -88,7 +84,6 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 )
 public class Status extends AbstractFivetranConnection implements RunnableTask<Status.Output> {
     private static final String CONNECTED_SETUP_STATE = "connected";
-    private static final String TABLE_ASSET_TYPE = "io.kestra.plugin.ee.assets.Table";
 
     @Schema(
         title = "Connector IDs",
@@ -162,7 +157,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
             Map<String, Connector> connectors = fetchAll(runContext, rConnectorIds);
             Map<String, ConnectorState> states = toStates(connectors, rFreshnessBuffer);
             logStates(logger, states);
-            emitAssets(runContext, connectors, states);
+            emitAssets(runContext, connectors, syncStates(states));
             return Output.builder().connectors(states).build();
         }
 
@@ -235,7 +230,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
         }
 
         logStates(logger, finalStates);
-        emitAssets(runContext, lastSeenConnectors.get(), finalStates);
+        emitAssets(runContext, lastSeenConnectors.get(), syncStates(finalStates));
         return Output.builder().connectors(finalStates).build();
     }
 
@@ -323,6 +318,14 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
         return message.toString();
     }
 
+    // The shared asset helper only needs the sync state, so states are projected down rather than
+    // leaking Status' output model into AbstractFivetranConnection.
+    private static Map<String, String> syncStates(Map<String, ConnectorState> states) {
+        Map<String, String> syncStates = new LinkedHashMap<>();
+        states.forEach((connectorId, state) -> syncStates.put(connectorId, state.getSyncState()));
+        return syncStates;
+    }
+
     private static void logStates(Logger logger, Map<String, ConnectorState> states) {
         states.forEach(
             (connectorId, state) -> logger.info(
@@ -333,67 +336,6 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
                 state.getFresh()
             )
         );
-    }
-
-    private void emitAssets(RunContext runContext, Map<String, Connector> connectors, Map<String, ConnectorState> states)
-        throws IllegalVariableEvaluationException {
-        for (Map.Entry<String, Connector> entry : connectors.entrySet()) {
-            String connectorId = entry.getKey();
-            Connector connector = entry.getValue();
-            String schema = connector.destinationSchemaName();
-            String assetId = sanitizeAssetId(composeAssetId(connectorId, connector, schema));
-
-            Map<String, Object> metadata = new LinkedHashMap<>();
-            metadata.put("system", "fivetran");
-            metadata.put("connectorId", connectorId);
-            metadata.put("schema", schema);
-            ConnectorState state = states.get(connectorId);
-            if (state != null && state.getSyncState() != null) {
-                metadata.put("syncState", state.getSyncState());
-            }
-
-            Asset asset = Custom.builder()
-                .id(assetId)
-                .type(TABLE_ASSET_TYPE)
-                .metadata(metadata)
-                .build();
-
-            try {
-                runContext.assets().emit(new AssetEmit(List.of(), List.of(asset)));
-            } catch (UnsupportedOperationException e) {
-                // OSS edition or tests where EE assets are not available — silently skip.
-                runContext.logger().debug("Asset emission is not supported in this edition, skipping.");
-                return;
-            } catch (QueueException e) {
-                runContext.logger().warn("Unable to emit fivetran asset for connector '{}'", connectorId, e);
-            }
-        }
-    }
-
-    // groupId scopes the schema to the connector's destination so two connectors landing in the same schema
-    // (e.g. shared across groups) still get distinct asset ids; connectorId is the fallback when groupId is absent.
-    private static String composeAssetId(String connectorId, Connector connector, String schema) {
-        String prefix = connector.getGroupId() != null ? connector.getGroupId() : connectorId;
-        return schema != null
-            ? sanitizeSegment(prefix) + "." + sanitizeSegment(schema)
-            : sanitizeSegment(connectorId);
-    }
-
-    // Sanitize each segment before joining so "." only ever appears as the delimiter: a raw segment can
-    // contain "." (e.g. schema "google_sheets.destination"), which would otherwise make the id ambiguous.
-    private static String sanitizeSegment(String segment) {
-        return segment.replaceAll("[^a-zA-Z0-9_:-]", "_");
-    }
-
-    // Enforce the rest of Asset's id contract (^[a-zA-Z0-9]..., size 1-150) that per-segment sanitization
-    // leaves: trim leading non-alphanumerics, fall back to a placeholder if that empties the id (e.g. "___"),
-    // and cap the length.
-    private static String sanitizeAssetId(String rawId) {
-        String sanitized = rawId.replaceFirst("^[^a-zA-Z0-9]+", "");
-        if (sanitized.isEmpty()) {
-            sanitized = "connector";
-        }
-        return sanitized.length() > 150 ? sanitized.substring(0, 150) : sanitized;
     }
 
     @Builder

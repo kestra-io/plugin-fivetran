@@ -18,4 +18,12 @@ A connector is `fresh` when its last sync succeeded within `syncFrequency` (in m
 
 By default (`wait: true`), `Status` acts as a freshness gate: it polls every `pollFrequency` (default 30 seconds) until all requested connectors are fresh, up to `maxDuration` (default 1 hour), and fails with a clear message naming the still-stale connectors if the deadline is reached. A paused connector, or one whose setup is not `connected` (`broken`, `incomplete`, bad auth), can never become fresh on its own, so the gate fails fast on it instead of polling forever; set `allowTerminal: true` to instead report such a connector as not-fresh and let the gate wait out `maxDuration`. Set `wait: false` for a single read-only snapshot that never throws on stale, paused, or broken connectors.
 
-When `assets.enableAuto` is set, `Status` emits one lineage asset per connector, keyed by its Fivetran destination schema (falling back to the connector name if no schema is reported).
+`connectors.Sync` returns the connector ID and, when it waited, the `succeededAt` of the sync it observed. `succeededAt` is null with `wait: false`, since the sync is still running on Fivetran when the task returns.
+
+When `assets.enableAuto` is set, both `Sync` and `Status` emit lineage. Emitting from both matters because a connector on Fivetran's own schedule is never triggered through `Sync`, and one driven from Kestra is often never read through `Status`.
+
+Per connector they emit one asset per synced table, with the id `database.schema.name` and metadata `system`, `database`, `schema`, `name` and `connectorId`. This is the same id convention plugin-dbt uses, so a Fivetran-loaded table and the dbt model reading it resolve to a single asset and the lineage edge forms with no manual mapping. The table list comes from the connector's schema config, skipping disabled schemas and tables, and the database name from the connector's destination. `system` names the warehouse rather than this plugin, matching what dbt records for the same table.
+
+The connector-level asset is still emitted alongside, keyed by the Fivetran destination schema, so existing asset IDs are unchanged and connector-level sync state keeps somewhere to live.
+
+Some destinations report no database name (Fivetran-managed destinations are the known case). Those connectors emit the connector-level asset only, and log a warning saying so. Nothing on the lineage path can fail a task whose sync succeeded: a failed destination or schema read, or an `assets.enableAuto` expression that will not render, warns and moves on.
