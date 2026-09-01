@@ -287,10 +287,11 @@ class TableAssetsTest {
     @Test
     @DisplayName("Should emit the same table assets from Sync, which is the only task a Fivetran-scheduled account runs")
     void syncEmitsTheSameTableAssetsAndReturnsAnOutput(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        String succeededAt = isoNow(-10);
         stubFor(
             get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID))
                 .inScenario(SYNC_SCENARIO).whenScenarioStateIs(Scenario.STARTED)
-                .willReturn(json(connectorBody(CONNECTOR_ID, SCHEMA, "2026-08-30T10:00:00.000Z")))
+                .willReturn(json(connectorBody(CONNECTOR_ID, SCHEMA, isoNow(-1440))))
         );
         stubFor(
             post(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync"))
@@ -302,7 +303,7 @@ class TableAssetsTest {
         stubFor(
             get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID))
                 .inScenario(SYNC_SCENARIO).whenScenarioStateIs("SYNCED")
-                .willReturn(json(connectorBody(CONNECTOR_ID, SCHEMA, "2026-08-31T10:00:00.000Z")))
+                .willReturn(json(connectorBody(CONNECTOR_ID, SCHEMA, succeededAt)))
         );
         stubDestination("""
             {"database": "analytics"}
@@ -325,7 +326,7 @@ class TableAssetsTest {
         Sync.Output output = task.run(runContextFactory.of(task, Map.of()));
 
         assertThat(output.getConnectorId(), is(CONNECTOR_ID));
-        assertThat(output.getSucceededAt(), is(ZonedDateTime.parse("2026-08-31T10:00:00.000Z", DateTimeFormatter.ISO_ZONED_DATE_TIME)));
+        assertThat(output.getSucceededAt(), is(ZonedDateTime.parse(succeededAt, DateTimeFormatter.ISO_ZONED_DATE_TIME)));
         assertThat(ids(emittedAssets()), contains(GROUP_ID + "." + SCHEMA, "analytics.salesforce.account"));
     }
 
@@ -334,7 +335,7 @@ class TableAssetsTest {
     void syncWithoutWaitReportsNoCompletionTime(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         stubFor(
             get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID))
-                .willReturn(json(connectorBody(CONNECTOR_ID, SCHEMA, "2026-08-30T10:00:00.000Z")))
+                .willReturn(json(connectorBody(CONNECTOR_ID, SCHEMA, isoNow(-1440))))
         );
         stubFor(
             post(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync"))
@@ -416,7 +417,7 @@ class TableAssetsTest {
     void syncWithoutWaitStillEmitsTableAssets(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         stubFor(
             get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID))
-                .willReturn(json(connectorBody(CONNECTOR_ID, SCHEMA, "2026-08-30T10:00:00.000Z")))
+                .willReturn(json(connectorBody(CONNECTOR_ID, SCHEMA, isoNow(-1440))))
         );
         stubFor(
             post(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync"))
@@ -556,7 +557,13 @@ class TableAssetsTest {
     }
 
     private static String connectorBody(String connectorId, String schema) {
-        return connectorBody(connectorId, schema, "2026-08-31T10:00:00.000Z");
+        return connectorBody(connectorId, schema, isoNow(-10));
+    }
+
+    // Freshness is computed against the wall clock, so stub timestamps must stay relative to it: an absolute
+    // date stops reading as fresh as soon as it falls outside the sync_frequency below.
+    private static String isoNow(long minutesOffset) {
+        return ZonedDateTime.now().plusMinutes(minutesOffset).toInstant().toString();
     }
 
     private static String connectorBody(String connectorId, String schema, String succeededAt) {
