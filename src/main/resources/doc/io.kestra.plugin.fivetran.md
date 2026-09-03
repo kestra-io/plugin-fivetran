@@ -4,7 +4,7 @@ Trigger Fivetran connector syncs from Kestra flows and optionally wait for compl
 
 ## Authentication
 
-Set `apiKey` and `apiSecret` (both required) for HTTP Basic authentication against the Fivetran API. Store secrets in [secrets](https://kestra.io/docs/concepts/secret) and apply connection properties globally with [plugin defaults](https://kestra.io/docs/workflow-components/plugin-defaults).
+Set `apiKey` and `apiSecret` (both required) for HTTP Basic authentication against the Fivetran API. Store secrets in [secrets](https://kestra.io/docs/concepts/secret) and set connection properties on each task.
 
 ## Tasks
 
