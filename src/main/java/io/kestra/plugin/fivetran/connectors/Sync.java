@@ -15,8 +15,10 @@ import io.kestra.core.http.HttpRequest;
 import io.kestra.core.http.HttpResponse;
 import io.kestra.core.http.client.HttpClientException;
 import io.kestra.core.models.annotations.Example;
+import io.kestra.core.models.annotations.Metric;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
+import io.kestra.core.models.executions.metrics.Counter;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.runners.RunContext;
@@ -40,7 +42,7 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 @NoArgsConstructor
 @Schema(
     title = "Trigger and optionally watch connector sync",
-    description = "Starts a Fivetran connector sync through the Fivetran API. Can force-cancel and restart an in-progress sync. Waits for completion by default (up to 60 minutes) and fails if the connector reports a failure. With `assets.enableAuto` set, emits one asset per table the connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph."
+    description = "Starts a Fivetran connector sync through the Fivetran API. Can force-cancel and restart an in-progress sync, or re-attach to one already in progress with `reattach`. Waits for completion by default (up to 60 minutes) and fails if the connector reports a failure. With `assets.enableAuto` set, emits one asset per table the connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph."
 )
 @Plugin(
     examples = {
@@ -74,7 +76,27 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
                     assets:
                       enableAuto: true
                 """
+        ),
+        @Example(
+            full = true,
+            title = "Re-attach to a sync already running on the connector instead of triggering a duplicate.",
+            code = """
+                id: fivetran_sync_reattach
+                namespace: company.team
+
+                tasks:
+                  - id: sync
+                    type: io.kestra.plugin.fivetran.connectors.Sync
+                    apiKey: "{{ secret('FIVETRAN_API_KEY') }}"
+                    apiSecret: "{{ secret('FIVETRAN_API_SECRET') }}"
+                    connectorId: "connector_id"
+                    reattach: true
+                    reattachMaxAge: PT30M
+                """
         )
+    },
+    metrics = {
+        @Metric(name = "reattached", type = Counter.TYPE, description = "Whether the task re-attached to an already in-progress sync (1) instead of triggering a new one (0).")
     }
 )
 public class Sync extends AbstractFivetranConnection implements RunnableTask<Sync.Output> {
@@ -115,6 +137,34 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
     @PluginProperty(group = "advanced")
     Property<Duration> pollFrequency = Property.ofValue(Duration.ofSeconds(5));
 
+    @Schema(
+        title = "Reattach to an already in-progress sync instead of starting a new one",
+        description = """
+            When true, adopts any sync already running on the connector -- including one Fivetran started itself on \
+            its own schedule, not just a sync a previous run of this task triggered -- instead of triggering a new \
+            one. Fivetran exposes no way to tell one sync run apart from another, so adoption matches on the \
+            connector's own `sync_state: syncing` as reported by Fivetran, not on this execution's identity. This \
+            covers a worker-loss resubmit, a retry, a replay, a manual re-run, or two executions driving the same \
+            connector: whichever one observes the connector already syncing waits on it instead of triggering a \
+            duplicate. Default is false. `force: true` always takes precedence over `reattach` and starts a new \
+            sync regardless."""
+    )
+    @Builder.Default
+    @PluginProperty(group = "reliability")
+    Property<Boolean> reattach = Property.ofValue(false);
+
+    @Schema(
+        title = "Maximum age of an in-progress sync that can still be re-attached to",
+        description = """
+            Used only when `reattach` is true. Fivetran reports no sync start time, so the connector's last \
+            completion timestamp is used as a conservative upper bound on how long the current sync has been \
+            running: when that bound exceeds `reattachMaxAge`, the in-progress sync is treated as stale and a new \
+            sync is triggered instead of adopting it. Default is unbounded: any in-progress sync is adopted, \
+            however long it has been running."""
+    )
+    @PluginProperty(group = "reliability")
+    Property<Duration> reattachMaxAge;
+
     @Builder.Default
     @Getter(AccessLevel.NONE)
     private transient Map<Integer, Integer> loggedLine = new HashMap<>();
@@ -129,32 +179,54 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             throw new IllegalArgumentException("pollFrequency must be a positive duration, but was " + rPollFrequency);
         }
 
-        Connector previousConnector = fetchConnector(runContext);
-
-        HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
-            .uri(
-                URI.create(
-                    rBaseUrl(runContext) + "/v2/connectors/" + encodePathSegment(connectorId) + "/sync"
-                )
-            )
-            .method("POST")
-            .body(
-                HttpRequest.JsonRequestBody.builder()
-                    .content(Map.of("force", runContext.render(this.force).as(Boolean.class).orElseThrow()))
-                    .build()
-            );
-
-        HttpResponse<SyncResponse> syncHttpResponse = this.request(runContext, requestBuilder, SyncResponse.class);
-        SyncResponse syncResponse = syncHttpResponse.getBody();
-        if (syncResponse == null) {
-            throw new IllegalStateException("Missing body on trigger");
+        Duration rReattachMaxAge = runContext.render(this.reattachMaxAge).as(Duration.class).orElse(null);
+        if (rReattachMaxAge != null && rReattachMaxAge.isNegative()) {
+            throw new IllegalArgumentException("reattachMaxAge must not be negative, but was " + rReattachMaxAge);
         }
 
-        logger.info("Job status {} with response: {}", syncHttpResponse.getStatus(), syncResponse);
+        Connector previousConnector = fetchConnector(runContext);
+
+        boolean rForce = runContext.render(this.force).as(Boolean.class).orElseThrow();
+        boolean rReattach = runContext.render(this.reattach).as(Boolean.class).orElseThrow();
+        if (rForce && rReattach) {
+            logger.warn("`force` takes precedence over `reattach`: a new sync will be triggered even though re-attach was requested");
+        }
+
+        boolean reattached = rReattach
+            && !rForce
+            && isSyncing(previousConnector)
+            && !isStaleForReattach(previousConnector, rReattachMaxAge, ZonedDateTime.now());
+
+        if (reattached) {
+            logger.info("Reattached to the sync already running on connector '{}' instead of triggering a new one", connectorId);
+        } else {
+            HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
+                .uri(
+                    URI.create(
+                        rBaseUrl(runContext) + "/v2/connectors/" + encodePathSegment(connectorId) + "/sync"
+                    )
+                )
+                .method("POST")
+                .body(
+                    HttpRequest.JsonRequestBody.builder()
+                        .content(Map.of("force", rForce))
+                        .build()
+                );
+
+            HttpResponse<SyncResponse> syncHttpResponse = this.request(runContext, requestBuilder, SyncResponse.class);
+            SyncResponse syncResponse = syncHttpResponse.getBody();
+            if (syncResponse == null) {
+                throw new IllegalStateException("Missing body on trigger");
+            }
+
+            logger.info("Job status {} with response: {}", syncHttpResponse.getStatus(), syncResponse);
+        }
+
+        runContext.metric(Counter.of("reattached", reattached ? 1 : 0));
 
         if (!runContext.render(this.wait).as(Boolean.class).orElseThrow()) {
             emitAssets(runContext, connectorId, previousConnector);
-            return Output.builder().connectorId(connectorId).build();
+            return Output.builder().connectorId(connectorId).reattached(reattached).build();
         }
 
         ZonedDateTime previousCompletedDate = previousConnector.completedDate();
@@ -203,7 +275,11 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         }
 
         if (finalConnector.hasFailed()) {
-            throw new Exception("Connector '" + connectorId + "' failed: " + finalConnector);
+            throw new Exception(
+                "Connector '" + connectorId + "' failed"
+                    + (reattached ? " (this task re-attached to a sync it did not trigger)" : "")
+                    + ": " + finalConnector
+            );
         }
 
         emitAssets(runContext, connectorId, finalConnector);
@@ -211,6 +287,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         return Output.builder()
             .connectorId(connectorId)
             .succeededAt(finalConnector.getSucceededAt())
+            .reattached(reattached)
             .build();
     }
 
@@ -229,6 +306,33 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
      */
     static boolean isTransientReadFailure(Throwable e) {
         return isRetriableTransientError(e, "GET");
+    }
+
+    private static final String SYNCING_STATE = "syncing";
+
+    // rescheduled is a queued retry, not a running sync, so only syncing counts as in-flight.
+    static boolean isSyncing(Connector connector) {
+        ConnectorStatusResponse status = connector.getStatus();
+        return status != null && SYNCING_STATE.equalsIgnoreCase(status.getSyncState());
+    }
+
+    /**
+     * Fivetran reports no sync start time, so completedDate() is used as a conservative upper bound on how
+     * long the current sync has been running: an in-flight sync necessarily started after the last
+     * completion. False negatives (refusing to adopt a fresh sync) are the safe direction here; false
+     * positives cannot occur. Parameterized on {@code now} so tests can assert the boundary deterministically.
+     */
+    static boolean isStaleForReattach(Connector connector, Duration maxAge, ZonedDateTime now) {
+        if (maxAge == null) {
+            return false;
+        }
+
+        ZonedDateTime completedDate = connector.completedDate();
+        if (completedDate == null) {
+            return true;
+        }
+
+        return completedDate.isBefore(now.minus(maxAge));
     }
 
     private Connector fetchConnector(RunContext runContext) throws IllegalVariableEvaluationException, HttpClientException {
@@ -250,5 +354,11 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             description = "Null when `wait` is false, since the sync is still running on Fivetran when the task returns."
         )
         ZonedDateTime succeededAt;
+
+        @Schema(
+            title = "Whether an already in-progress sync was re-attached to",
+            description = "True when `reattach` adopted a sync already running on the connector instead of triggering a new one."
+        )
+        boolean reattached;
     }
 }
