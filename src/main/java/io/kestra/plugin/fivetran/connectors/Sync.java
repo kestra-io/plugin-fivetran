@@ -158,10 +158,12 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         description = """
             Used only when `reattach` is true. Fivetran reports no sync start time, so the connector's last \
             completion timestamp is used as a conservative upper bound on how long the current sync has been \
-            running: when that bound exceeds `reattachMaxAge`, the in-progress sync is treated as stale and a new \
-            sync is triggered instead of adopting it. A connector that has never completed a sync has no such \
-            upper bound to check, so once `reattachMaxAge` is set it is always treated as stale and never \
-            adopted. Default is unbounded: any in-progress sync is adopted, however long it has been running."""
+            running: when that bound exceeds `reattachMaxAge`, the in-progress sync is treated as stale: it is \
+            cancelled and a new sync is started (the trigger is sent with `force: true`) instead of adopting it. \
+            A connector that has never completed a sync has no such upper bound to check, so once \
+            `reattachMaxAge` is set it is always treated as stale and never adopted -- also taking the forced, \
+            cancel-and-restart path. Default is unbounded: any in-progress sync is adopted, however long it has \
+            been running."""
     )
     @PluginProperty(group = "reliability")
     Property<Duration> reattachMaxAge;
