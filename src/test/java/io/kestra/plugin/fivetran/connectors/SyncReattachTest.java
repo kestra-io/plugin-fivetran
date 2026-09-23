@@ -195,6 +195,50 @@ class SyncReattachTest {
     }
 
     @Test
+    @DisplayName("Should force-restart a stale in-progress sync instead of sending a no-op trigger")
+    void staleInProgressSyncIsForceRestarted(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID))
+                .inScenario(SYNC_SCENARIO)
+                .whenScenarioStateIs(Scenario.STARTED)
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody("2020-01-01T00:00:00.000Z", null, "syncing"))
+                )
+        );
+
+        stubFor(
+            post(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync"))
+                .inScenario(SYNC_SCENARIO)
+                .whenScenarioStateIs(Scenario.STARTED)
+                .willSetStateTo("SYNCED")
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(SYNC_TRIGGERED_BODY)
+                )
+        );
+
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID))
+                .inScenario(SYNC_SCENARIO)
+                .whenScenarioStateIs("SYNCED")
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(connectorBody("2026-07-27T13:13:08.389Z", null, "scheduled"))
+                )
+        );
+
+        Sync.Output output = syncTask(wmRuntimeInfo.getHttpBaseUrl(), true, Duration.ofMinutes(5), false).run(runContext());
+
+        assertFalse(output.isReattached());
+        verify(
+            exactly(1),
+            postRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync"))
+                .withRequestBody(containing("\"force\":true"))
+        );
+    }
+
+    @Test
     @DisplayName("Should let force win over reattach and trigger a new sync with force=true")
     void forceTakesPrecedenceOverReattach(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         stubFor(

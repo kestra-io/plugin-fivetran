@@ -193,14 +193,18 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             logger.warn("`force` takes precedence over `reattach`: a new sync will be triggered even though re-attach was requested");
         }
 
-        var reattached = rReattach
+        var wasSyncing = isSyncing(previousConnector);
+        var staleSync = rReattach
             && !rForce
-            && isSyncing(previousConnector)
-            && !isStaleForReattach(previousConnector, rReattachMaxAge, ZonedDateTime.now());
+            && wasSyncing
+            && isStaleForReattach(previousConnector, rReattachMaxAge, ZonedDateTime.now());
+        var reattached = rReattach && !rForce && wasSyncing && !staleSync;
 
         if (reattached) {
             logger.info("Reattached to the sync already running on connector '{}' instead of triggering a new one", connectorId);
         } else {
+            // A stale in-progress sync ignores a non-forced trigger on Fivetran's side, so force it here to
+            // cancel that stale sync and start a fresh one instead of adopting it.
             HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
                 .uri(
                     URI.create(
@@ -210,7 +214,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
                 .method("POST")
                 .body(
                     HttpRequest.JsonRequestBody.builder()
-                        .content(Map.of("force", rForce))
+                        .content(Map.of("force", rForce || staleSync))
                         .build()
                 );
 
