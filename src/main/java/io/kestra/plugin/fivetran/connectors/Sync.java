@@ -159,8 +159,9 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             Used only when `reattach` is true. Fivetran reports no sync start time, so the connector's last \
             completion timestamp is used as a conservative upper bound on how long the current sync has been \
             running: when that bound exceeds `reattachMaxAge`, the in-progress sync is treated as stale and a new \
-            sync is triggered instead of adopting it. Default is unbounded: any in-progress sync is adopted, \
-            however long it has been running."""
+            sync is triggered instead of adopting it. A connector that has never completed a sync has no such \
+            upper bound to check, so once `reattachMaxAge` is set it is always treated as stale and never \
+            adopted. Default is unbounded: any in-progress sync is adopted, however long it has been running."""
     )
     @PluginProperty(group = "reliability")
     Property<Duration> reattachMaxAge;
@@ -179,20 +180,20 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             throw new IllegalArgumentException("pollFrequency must be a positive duration, but was " + rPollFrequency);
         }
 
-        Duration rReattachMaxAge = runContext.render(this.reattachMaxAge).as(Duration.class).orElse(null);
+        var rReattachMaxAge = runContext.render(this.reattachMaxAge).as(Duration.class).orElse(null);
         if (rReattachMaxAge != null && rReattachMaxAge.isNegative()) {
             throw new IllegalArgumentException("reattachMaxAge must not be negative, but was " + rReattachMaxAge);
         }
 
         Connector previousConnector = fetchConnector(runContext);
 
-        boolean rForce = runContext.render(this.force).as(Boolean.class).orElseThrow();
-        boolean rReattach = runContext.render(this.reattach).as(Boolean.class).orElseThrow();
+        var rForce = runContext.render(this.force).as(Boolean.class).orElseThrow();
+        var rReattach = runContext.render(this.reattach).as(Boolean.class).orElse(false);
         if (rForce && rReattach) {
             logger.warn("`force` takes precedence over `reattach`: a new sync will be triggered even though re-attach was requested");
         }
 
-        boolean reattached = rReattach
+        var reattached = rReattach
             && !rForce
             && isSyncing(previousConnector)
             && !isStaleForReattach(previousConnector, rReattachMaxAge, ZonedDateTime.now());
