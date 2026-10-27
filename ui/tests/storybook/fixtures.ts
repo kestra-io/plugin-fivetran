@@ -161,6 +161,7 @@ export const configuredSyncTask = {
     maxDuration: "PT30M",
     pollFrequency: "PT5S",
     reattach: true,
+    reattachMaxAge: "PT2H",
     assets: { enableAuto: true },
 };
 

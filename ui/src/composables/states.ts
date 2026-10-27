@@ -1,4 +1,3 @@
-// Kestra's State.Type values, split into "still going" and "done".
 export const RUNNING_STATES = [
     "CREATED",
     "SUBMITTED",

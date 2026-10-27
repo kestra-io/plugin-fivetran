@@ -50,7 +50,7 @@ Each id segment is sanitized on its own before being joined with `.`, so a `.` i
 `ui/` is a Vue 3 + Vite micro-frontend (same structure and dependency set as `plugin-airbyte`) that adds to the topology graph, for `connectors.Sync` and `connectors.Status` only:
 
 - A card under the node (`topology-details` slot, `ConnectorTopologyDetails.vue`). Before a run it shows the task settings as written (`connectorId`/`connectorIds`, `wait`, `maxDuration`, plus `freshnessBuffer` on `Status`); after a run, `Sync` shows sync state, last success, fresh, alerts and tables, and `Status` shows connectors, fresh, paused, with alerts and tables.
-- A "Fivetran details" action. It has no `taskProp`, so the host opens a dialog with the `topology-task-modal` slot (`ConnectorDetails.vue`): task settings, then every connector with its states, dates, fresh verdict, alert codes and table counts. On `Sync` with `wait: false` it notes that the values are the snapshot taken before the trigger.
+- A "Show Details" action. It has no `taskProp`, so the host opens a dialog with the `topology-task-modal` slot (`ConnectorDetails.vue`): task settings, then every connector with its states, dates, fresh verdict, alert codes and table counts. On `Sync` with `wait: false` it notes that the values are the snapshot taken before the trigger.
 
 Rules:
 

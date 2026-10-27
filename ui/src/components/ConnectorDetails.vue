@@ -55,9 +55,8 @@ const { t } = useI18n({
 });
 
 const props = defineProps<KnownSlotProps["topology-task-modal"]>();
-const { taskRunState, hasExecution, hasOutputs, connectors, notWaited } = useConnectorData(
-    props as KnownSlotProps["topology-details"],
-);
+const { taskRunState, hasExecution, hasOutputs, isStatusOutput, connectors, notWaited } =
+    useConnectorData(props as KnownSlotProps["topology-details"]);
 
 const task = computed(() => props.task as Record<string, any> | undefined);
 const settingRows = computed(() =>
@@ -72,15 +71,19 @@ const running = computed(
 );
 
 const rowsFor = (connector: ConnectorView) => {
+    // Sync's freshness summary has no name, schema status, schedule type or completion date.
+    const status = isStatusOutput.value;
     const rows = [
         { label: t("id"), value: connector.id ?? MISSING },
-        { label: t("name"), value: connector.name ?? MISSING },
+        ...(status ? [{ label: t("name"), value: connector.name ?? MISSING }] : []),
         { label: t("syncState"), value: formatState(connector.syncState) },
         { label: t("setupState"), value: formatState(connector.setupState) },
         { label: t("updateState"), value: formatState(connector.updateState) },
-        { label: t("schemaStatus"), value: formatState(connector.schemaStatus) },
+        ...(status
+            ? [{ label: t("schemaStatus"), value: formatState(connector.schemaStatus) }]
+            : []),
         { label: t("paused"), value: formatBool(connector.paused) },
-        { label: t("scheduleType"), value: connector.scheduleType ?? MISSING },
+        ...(status ? [{ label: t("scheduleType"), value: connector.scheduleType ?? MISSING }] : []),
         { label: t("syncFrequency"), value: formatMinutes(connector.syncFrequency) },
         { label: t("succeededAt"), value: formatDateTime(connector.succeededAt) },
     ];
@@ -90,9 +93,11 @@ const rowsFor = (connector: ConnectorView) => {
             value: formatDateTime(connector.observedSucceededAt),
         });
     }
+    rows.push({ label: t("failedAt"), value: formatDateTime(connector.failedAt) });
+    if (status) {
+        rows.push({ label: t("completedDate"), value: formatDateTime(connector.completedDate) });
+    }
     rows.push(
-        { label: t("failedAt"), value: formatDateTime(connector.failedAt) },
-        { label: t("completedDate"), value: formatDateTime(connector.completedDate) },
         { label: t("fresh"), value: formatBool(connector.fresh) },
         { label: t("alerts"), value: formatNumber(connector.alertCount) },
         {

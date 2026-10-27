@@ -4,8 +4,7 @@ import { TERMINAL_STATES } from "./states";
 
 type SlotProps = KnownSlotProps["topology-details"];
 
-// One connector, whichever task produced it. Every field is optional: executions that ran before
-// an output existed, a failed schema read (null table counts) and wait: false all leave gaps.
+// One connector, whichever task produced it; every field is optional (old executions, failed schema read).
 export interface ConnectorView {
     id?: string;
     name?: string;
@@ -24,7 +23,7 @@ export interface ConnectorView {
     alertCodes: string[];
     tableCount?: number | null;
     enabledTableCount?: number | null;
-    // Sync only: completion of the sync the task itself observed (null on wait: false).
+    // Sync only: completion of the sync it observed (null on wait: false).
     observedSucceededAt?: string | null;
 }
 
@@ -50,8 +49,7 @@ function fromState(state: Record<string, any>, fallbackId?: string): ConnectorVi
     };
 }
 
-// Reads this task run's outputs through the host-provided lazy fetcher, falling back to the
-// outputs embedded in the task run. Makes no HTTP call of its own. The `tables` file is never read.
+// Uses the host's lazy fetcher, never its own HTTP call; the `tables` file is never read.
 export function useConnectorData(props: SlotProps) {
     const taskId = computed(() => props.task?.id as string | undefined);
     const hasExecution = computed(() => !!props.execution?.id);
@@ -72,7 +70,7 @@ export function useConnectorData(props: SlotProps) {
         }
     }
 
-    // A card opened while the task is still running has no outputs yet: reload once the task run ends.
+    // Reload once the task run ends: a card opened mid-run has no outputs yet.
     const taskRunState = computed(() => taskRun.value?.state?.current as string | undefined);
     const isTerminal = computed(() => TERMINAL_STATES.includes(taskRunState.value ?? ""));
 
@@ -113,8 +111,7 @@ export function useConnectorData(props: SlotProps) {
         return [view];
     });
 
-    // Sync with wait: false returns the snapshot taken before the trigger: no sync was observed
-    // and freshness is unknown. A literal `wait: false` on the task says the same before any output.
+    // wait: false returns the pre-trigger snapshot, so no sync was observed and freshness is unknown.
     const notWaited = computed(() => {
         const out = taskOutputs.value;
         if (!hasOutputs.value || isStatusOutput.value || !out?.freshness) return false;

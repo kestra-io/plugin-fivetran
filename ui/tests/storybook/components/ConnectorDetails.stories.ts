@@ -45,6 +45,7 @@ export const SyncNoExecution: Story = {
         expect(canvas.getByText("30 min")).toBeInTheDocument();
         expect(canvas.getByText("5 s")).toBeInTheDocument();
         expect(canvas.getByText("Reattach to running sync")).toBeInTheDocument();
+        expect(canvas.getByText("2 h")).toBeInTheDocument();
         expect(canvas.getByText("Automatic assets")).toBeInTheDocument();
         expect(canvas.getByText("Run the flow to see the connector details.")).toBeInTheDocument();
     },
@@ -70,6 +71,9 @@ export const SyncWaited: Story = {
         expect(canvas.getByText("on schedule")).toBeInTheDocument();
         expect(canvas.getByText("6 h")).toBeInTheDocument();
         expect(canvas.getByText("12 / 14")).toBeInTheDocument();
+        for (const label of ["Name", "Schema status", "Schedule type", "Last completion"]) {
+            expect(canvas.queryByText(label)).toBeNull();
+        }
         expect(canvas.queryByText(/snapshot taken before/)).toBeNull();
         expect(canvasElement.textContent).not.toContain("tables.ion");
     },
@@ -114,6 +118,8 @@ export const StatusWithPausedAndAlerts: Story = {
         expect(canvas.getByText("Connector conn_c", { selector: "summary" })).toBeInTheDocument();
         expect(canvas.getByText("paused", { selector: "div,span,td,dd" })).toBeInTheDocument();
         expect(canvas.getByText("task_failed")).toBeInTheDocument();
+        expect(canvas.getAllByText("Schema status").length).toBeGreaterThan(0);
+        expect(canvas.getAllByText("Last completion").length).toBeGreaterThan(0);
         expect(canvas.getByText("warning_a")).toBeInTheDocument();
         expect(canvas.getByText("5 / 5")).toBeInTheDocument();
         expect(canvasElement.textContent).not.toContain("null");

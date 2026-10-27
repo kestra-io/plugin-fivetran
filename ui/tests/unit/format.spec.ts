@@ -73,4 +73,27 @@ describe("settings", () => {
         });
         expect(JSON.stringify(settings)).not.toContain("SECRET");
     });
+
+    test("joins a JSON-encoded connectorIds list like an array", () => {
+        const status = (connectorIds: unknown) =>
+            headlineSettings({
+                type: "io.kestra.plugin.fivetran.connectors.Status",
+                connectorIds,
+            })[0].value;
+        expect(status('["a","b","c"]')).toBe("a, b, c");
+        expect(status("[not json")).toBe("[not json");
+        expect(status("{{ vars.ids }}")).toBe("{{ vars.ids }}");
+    });
+
+    test("lists reattachMaxAge on Sync as a readable duration", () => {
+        const row = taskSettings({
+            type: "io.kestra.plugin.fivetran.connectors.Sync",
+            reattachMaxAge: "PT2H",
+        }).find((s) => s.key === "reattachMaxAge");
+        expect(row).toEqual({
+            key: "reattachMaxAge",
+            label: "Max age of a reattached sync",
+            value: "2 h",
+        });
+    });
 });
