@@ -261,12 +261,12 @@ class TableAssetsTest {
         task.run(runContextFactory.of(task, Map.of()));
 
         assertThat(ids(emittedAssets()), contains(GROUP_ID + "." + SCHEMA));
-        // Without a database no table-grain id can be composed, so the schema read is not worth paying for.
-        verify(exactly(0), getRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/schemas")));
+        // The schema read feeds the table breakdown too, so it still happens exactly once without a database.
+        verify(exactly(1), getRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/schemas")));
     }
 
     @Test
-    @DisplayName("Should make no lineage call at all when assets.enableAuto is unset")
+    @DisplayName("Should make no destination call when assets.enableAuto is unset")
     void makesNoLineageCallWhenAssetsAreDisabled(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         stubConnector(wmRuntimeInfo);
         stubDestination("""
@@ -281,7 +281,8 @@ class TableAssetsTest {
 
         assertThat(assetManagerFactory.allEmitted(), hasSize(0));
         verify(exactly(0), getRequestedFor(urlEqualTo("/v2/destinations/" + GROUP_ID)));
-        verify(exactly(0), getRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/schemas")));
+        // Only the table breakdown reads the schema config when lineage is off.
+        verify(exactly(1), getRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/schemas")));
     }
 
     @Test

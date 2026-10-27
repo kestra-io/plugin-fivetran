@@ -25,8 +25,10 @@ import io.kestra.core.runners.RunContext;
 import io.kestra.core.utils.Await;
 import io.kestra.plugin.fivetran.AbstractFivetranConnection;
 import io.kestra.plugin.fivetran.models.Connector;
+import io.kestra.plugin.fivetran.models.ConnectorSchema;
 import io.kestra.plugin.fivetran.models.ConnectorStatusResponse;
 import io.kestra.plugin.fivetran.models.SyncResponse;
+import io.kestra.plugin.fivetran.models.TableBreakdown;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotNull;
@@ -42,7 +44,7 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 @NoArgsConstructor
 @Schema(
     title = "Trigger and optionally watch connector sync",
-    description = "Starts a Fivetran connector sync through the Fivetran API. Can force-cancel and restart an in-progress sync, or re-attach to one already in progress with `reattach`. Waits for completion by default (up to 60 minutes) and fails if the connector reports a failure. With `assets.enableAuto` set, emits one asset per table the connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph."
+    description = "Starts a Fivetran connector sync through the Fivetran API. Can force-cancel and restart an in-progress sync, or re-attach to one already in progress with `reattach`. Waits for completion by default (up to 60 minutes) and fails if the connector reports a failure. With `assets.enableAuto` set, emits one asset per table the connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph. Whatever `assets.enableAuto` is set to, reads the connector's schema config once (one extra GET) to output a per-table breakdown file (`tables`, `tableCount`, `enabledTableCount`) and a `freshness` summary with the connector's alert codes; a failed schema read logs a warning and never fails the task."
 )
 @Plugin(
     examples = {
@@ -232,8 +234,8 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         runContext.metric(Counter.of("reattached", reattached ? 1 : 0));
 
         if (!runContext.render(this.wait).as(Boolean.class).orElseThrow()) {
-            emitAssets(runContext, connectorId, previousConnector);
-            return Output.builder().connectorId(connectorId).reattached(reattached).build();
+            var outputBuilder = Output.builder().connectorId(connectorId).reattached(reattached);
+            return withBreakdown(runContext, connectorId, previousConnector, ConnectorFreshness.from(previousConnector, null), outputBuilder);
         }
 
         ZonedDateTime previousCompletedDate = previousConnector.completedDate();
@@ -289,22 +291,40 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             );
         }
 
-        emitAssets(runContext, connectorId, finalConnector);
-
-        return Output.builder()
+        var outputBuilder = Output.builder()
             .connectorId(connectorId)
             .succeededAt(finalConnector.getSucceededAt())
-            .reattached(reattached)
-            .build();
+            .reattached(reattached);
+        return withBreakdown(runContext, connectorId, finalConnector, ConnectorFreshness.from(finalConnector, true), outputBuilder);
     }
 
-    // Single-connector view of the shared lineage helper.
-    private void emitAssets(RunContext runContext, String connectorId, Connector connector) {
-        ConnectorStatusResponse status = connector.getStatus();
-        Map<String, String> syncStates = new HashMap<>();
-        syncStates.put(connectorId, status != null ? status.getSyncState() : null);
+    // The schema config is read once and shared by lineage and the table breakdown.
+    private Output withBreakdown(
+        RunContext runContext,
+        String connectorId,
+        Connector connector,
+        ConnectorFreshness freshness,
+        Output.OutputBuilder outputBuilder) throws Exception {
+        Map<String, ConnectorSchema> schemas = readSchemas(runContext, connectorId);
 
-        this.emitAssets(runContext, Map.of(connectorId, connector), syncStates);
+        Map<String, String> syncStates = new HashMap<>();
+        syncStates.put(connectorId, freshness.getSyncState());
+        this.emitAssets(
+            runContext,
+            Map.of(connectorId, connector),
+            syncStates,
+            schemas != null ? Map.of(connectorId, schemas) : Map.of()
+        );
+
+        outputBuilder.freshness(freshness);
+        TableBreakdown breakdown = writeTableBreakdown(runContext, schemas);
+        if (breakdown != null) {
+            outputBuilder
+                .tables(breakdown.getUri())
+                .tableCount(breakdown.getTableCount())
+                .enabledTableCount(breakdown.getEnabledTableCount());
+        }
+        return outputBuilder.build();
     }
 
     /**
@@ -367,5 +387,29 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             description = "True when `reattach` adopted a sync already running on the connector instead of triggering a new one."
         )
         boolean reattached;
+
+        @Schema(
+            title = "Connector freshness",
+            description = "State of the connector when the task returned. With `wait: true` it is read after the sync completed. With `wait: false` it is the snapshot taken before the sync was triggered, so `fresh` is null."
+        )
+        ConnectorFreshness freshness;
+
+        @Schema(
+            title = "Per-table breakdown file",
+            description = "URI of an Ion file in internal storage with one row per table of the connector: `schema`, `schemaInDestination`, `schemaEnabled`, `table`, `tableInDestination`, `enabled`, `syncMode` and `enabledPatchAllowed`. Null when the schema config could not be read."
+        )
+        URI tables;
+
+        @Schema(
+            title = "Number of tables",
+            description = "Every table the connector reports, enabled or not. Null when the schema config could not be read."
+        )
+        Integer tableCount;
+
+        @Schema(
+            title = "Number of enabled tables",
+            description = "Tables that are enabled and belong to an enabled schema, i.e. the ones written to the destination. Null when the schema config could not be read."
+        )
+        Integer enabledTableCount;
     }
 }

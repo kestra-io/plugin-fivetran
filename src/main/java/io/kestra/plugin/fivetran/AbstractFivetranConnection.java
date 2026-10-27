@@ -1,13 +1,16 @@
 package io.kestra.plugin.fivetran;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -38,6 +41,7 @@ import io.kestra.core.models.tasks.retrys.Exponential;
 import io.kestra.core.queues.QueueException;
 import io.kestra.core.runners.AssetEmit;
 import io.kestra.core.runners.RunContext;
+import io.kestra.core.serializers.FileSerde;
 import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.utils.RetryUtils;
 import io.kestra.plugin.fivetran.models.Connector;
@@ -47,12 +51,14 @@ import io.kestra.plugin.fivetran.models.ConnectorSchemasResponse;
 import io.kestra.plugin.fivetran.models.Destination;
 import io.kestra.plugin.fivetran.models.DestinationResponse;
 import io.kestra.plugin.fivetran.models.SchemaTable;
+import io.kestra.plugin.fivetran.models.TableBreakdown;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
+import reactor.core.publisher.Flux;
 
 @SuperBuilder
 @ToString
@@ -306,6 +312,95 @@ public abstract class AbstractFivetranConnection extends Task {
     }
 
     /**
+     * Reads a connector's schema config for the table breakdown and lineage. Never throws: both are
+     * metadata about the run, so a failed read must not fail a task whose sync succeeded.
+     *
+     * @return The schemas, or null when the read failed.
+     */
+    protected Map<String, ConnectorSchema> readSchemas(RunContext runContext, String connectorId) {
+        try {
+            return fetchConnectorSchemas(runContext, connectorId);
+        } catch (Exception e) {
+            // Status and exception type only: the response body is never logged.
+            var reason = e instanceof HttpClientResponseException hcre && hcre.getResponse() != null
+                ? "HTTP " + hcre.getResponse().getStatus().getCode()
+                : e.getClass().getSimpleName();
+            runContext.logger().warn(
+                "Could not read the schema config of connector '{}' ({}), skipping the table breakdown and table-level assets. Check that the API key may read connector schemas.",
+                connectorId,
+                reason
+            );
+            return null;
+        }
+    }
+
+    /**
+     * Reads the schema config of each connector, leaving out the ones whose read failed.
+     */
+    protected Map<String, Map<String, ConnectorSchema>> readAllSchemas(RunContext runContext, Collection<String> connectorIds) {
+        var schemasByConnector = new LinkedHashMap<String, Map<String, ConnectorSchema>>();
+        for (String connectorId : connectorIds) {
+            var schemas = readSchemas(runContext, connectorId);
+            if (schemas != null) {
+                schemasByConnector.put(connectorId, schemas);
+            }
+        }
+        return schemasByConnector;
+    }
+
+    /**
+     * Writes one Ion row per table to internal storage. Rows carry an explicit allow-list of fields, so
+     * nothing else from the schema config (columns, row filters, free-text reasons) reaches storage.
+     * Disabled schemas and tables are included with their flags; only {@code enabledTableCount} excludes them.
+     *
+     * @return The storage URI and counts, or null when the schemas could not be read.
+     */
+    protected TableBreakdown writeTableBreakdown(RunContext runContext, Map<String, ConnectorSchema> schemas) throws IOException {
+        if (schemas == null) {
+            return null;
+        }
+
+        var rows = new ArrayList<Map<String, Object>>();
+        var enabledTableCount = 0;
+        for (Map.Entry<String, ConnectorSchema> schemaEntry : schemas.entrySet()) {
+            var schema = schemaEntry.getValue();
+            if (schema == null || schema.getTables() == null) {
+                continue;
+            }
+            var schemaInDestination = schema.destinationName(schemaEntry.getKey());
+
+            for (Map.Entry<String, SchemaTable> tableEntry : schema.getTables().entrySet()) {
+                var table = tableEntry.getValue();
+                if (table == null) {
+                    continue;
+                }
+
+                if (schema.isEnabled() && table.isEnabled()) {
+                    enabledTableCount++;
+                }
+
+                var row = new LinkedHashMap<String, Object>();
+                row.put("schema", schemaEntry.getKey());
+                row.put("schemaInDestination", schemaInDestination);
+                row.put("schemaEnabled", schema.isEnabled());
+                row.put("table", tableEntry.getKey());
+                row.put("tableInDestination", table.destinationName(tableEntry.getKey()));
+                row.put("enabled", table.isEnabled());
+                row.put("syncMode", table.getSyncMode());
+                row.put("enabledPatchAllowed", table.getEnabledPatchSettings() != null ? table.getEnabledPatchSettings().getAllowed() : null);
+                rows.add(row);
+            }
+        }
+
+        var tempFile = runContext.workingDir().createTempFile(".ion").toFile();
+        try (OutputStream output = Files.newOutputStream(tempFile.toPath())) {
+            FileSerde.writeAll(output, Flux.fromIterable(rows)).block();
+        }
+
+        return new TableBreakdown(runContext.storage().putFile(tempFile), rows.size(), enabledTableCount);
+    }
+
+    /**
      * Reads a destination, whose config carries the warehouse database name behind a Fivetran group ID.
      *
      * @param runContext The run context used to render properties and build the HTTP client.
@@ -352,8 +447,14 @@ public abstract class AbstractFivetranConnection extends Task {
      * @param runContext The run context used to render properties and emit assets.
      * @param connectors Connectors keyed by the ID they were requested with.
      * @param syncStates Optional sync state per connector ID, recorded on the connector-grain asset.
+     * @param schemasByConnector Schema config already read per connector ID, so lineage and the table
+     *        breakdown share one GET. A connector absent from it emits no table assets.
      */
-    protected void emitAssets(RunContext runContext, Map<String, Connector> connectors, Map<String, String> syncStates) {
+    protected void emitAssets(
+        RunContext runContext,
+        Map<String, Connector> connectors,
+        Map<String, String> syncStates,
+        Map<String, Map<String, ConnectorSchema>> schemasByConnector) {
         if (connectors == null || connectors.isEmpty()) {
             return;
         }
@@ -383,7 +484,7 @@ public abstract class AbstractFivetranConnection extends Task {
 
             var assets = new ArrayList<Asset>();
             assets.add(connectorAsset(connectorId, connector, syncStates == null ? null : syncStates.get(connectorId)));
-            assets.addAll(tableAssets(runContext, connectorId, connector, destinationByGroup));
+            assets.addAll(tableAssets(runContext, connectorId, connector, destinationByGroup, schemasByConnector.get(connectorId)));
 
             try {
                 runContext.assets().emit(new AssetEmit(List.of(), assets));
@@ -424,10 +525,15 @@ public abstract class AbstractFivetranConnection extends Task {
 
     /**
      * One asset per table the connector writes, id {@code database.schema.name}. Returns empty rather than
-     * throwing when the database or the schema config cannot be read: lineage is metadata about the run,
+     * throwing when the database or the schema config is unavailable: lineage is metadata about the run,
      * never the run itself, so a lineage read failure must not fail a sync that actually succeeded.
      */
-    private List<Asset> tableAssets(RunContext runContext, String connectorId, Connector connector, Map<String, Destination> destinationByGroup) {
+    private List<Asset> tableAssets(
+        RunContext runContext,
+        String connectorId,
+        Connector connector,
+        Map<String, Destination> destinationByGroup,
+        Map<String, ConnectorSchema> schemas) {
         Destination destination = resolveDestination(runContext, connector, destinationByGroup);
         String database = destination != null ? destination.databaseName() : null;
         if (database == null) {
@@ -443,15 +549,8 @@ public abstract class AbstractFivetranConnection extends Task {
             return List.of();
         }
 
-        Map<String, ConnectorSchema> schemas;
-        try {
-            schemas = fetchConnectorSchemas(runContext, connectorId);
-        } catch (Exception e) {
-            runContext.logger().warn(
-                "Could not read the schema config of connector '{}', emitting the connector asset only.",
-                connectorId,
-                e
-            );
+        // A failed schema read was already warned about by readSchemas.
+        if (schemas == null) {
             return List.of();
         }
 

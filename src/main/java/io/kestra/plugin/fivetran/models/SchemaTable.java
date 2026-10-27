@@ -8,8 +8,9 @@ import lombok.experimental.SuperBuilder;
 import lombok.extern.jackson.Jacksonized;
 
 /**
- * One table inside a connector's schema config. Only the destination name and the enabled flag are
- * mapped: the endpoint also returns every column, which is never needed to compose an asset id.
+ * One table inside a connector's schema config. Only the destination name, the enabled flag, the sync mode
+ * and the patch permission are mapped: the endpoint also returns columns, row filters and free-text
+ * reasons, none of which belong in an output or in storage.
  */
 @Value
 @Jacksonized
@@ -21,6 +22,13 @@ public class SchemaTable {
 
     @JsonProperty("enabled")
     Boolean enabled;
+
+    // Absent when the connection type does not support switching sync modes.
+    @JsonProperty("sync_mode")
+    String syncMode;
+
+    @JsonProperty("enabled_patch_settings")
+    EnabledPatchSettings enabledPatchSettings;
 
     /**
      * The table name as written in the destination. Falls back to the source-side key when Fivetran

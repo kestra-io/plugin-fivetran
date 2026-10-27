@@ -1,5 +1,7 @@
 package io.kestra.plugin.fivetran.connectors;
 
+import java.io.IOException;
+import java.net.URI;
 import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.util.LinkedHashMap;
@@ -23,6 +25,7 @@ import io.kestra.core.utils.Await;
 import io.kestra.plugin.fivetran.AbstractFivetranConnection;
 import io.kestra.plugin.fivetran.models.Connector;
 import io.kestra.plugin.fivetran.models.ConnectorStatusResponse;
+import io.kestra.plugin.fivetran.models.TableBreakdown;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotNull;
@@ -38,7 +41,7 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 @NoArgsConstructor
 @Schema(
     title = "Read the status of one or more Fivetran connectors, optionally gating on freshness",
-    description = "Reads each connector's current status through a single GET call per connector. Never triggers a sync. By default (`wait: true`), polls until every connector is fresh so downstream tasks only run once the underlying data is up to date; set `wait: false` for a single read-only snapshot. With `assets.enableAuto` set, emits one asset per table each connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph."
+    description = "Reads each connector's current status through a single GET call per connector. Never triggers a sync. By default (`wait: true`), polls until every connector is fresh so downstream tasks only run once the underlying data is up to date; set `wait: false` for a single read-only snapshot. Reads each connector's schema config once, on the final state and whatever `assets.enableAuto` is set to (one extra GET per connector), to output a per-table breakdown file (`tables`, `tableCount`, `enabledTableCount`); a failed schema read logs a warning and never fails the task. It also reports `updateState`, `alertCount` and `alertCodes`. With `assets.enableAuto` set, emits one asset per table each connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph."
 )
 @Plugin(
     examples = {
@@ -156,9 +159,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
         if (!rWait) {
             Map<String, Connector> connectors = fetchAll(runContext, rConnectorIds);
             Map<String, ConnectorState> states = toStates(connectors, rFreshnessBuffer);
-            logStates(logger, states);
-            emitAssets(runContext, connectors, syncStates(states));
-            return Output.builder().connectors(states).build();
+            return finish(runContext, connectors, states);
         }
 
         Duration rPollFrequency = runContext.render(this.pollFrequency).as(Duration.class).orElse(Duration.ofSeconds(30));
@@ -229,9 +230,33 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
             throw new TimeoutException(timeoutMessage(rMaxDuration, lastSeenStates.get(), lastTransientError.get()));
         }
 
-        logStates(logger, finalStates);
-        emitAssets(runContext, lastSeenConnectors.get(), syncStates(finalStates));
-        return Output.builder().connectors(finalStates).build();
+        return finish(runContext, lastSeenConnectors.get(), finalStates);
+    }
+
+    // Runs once, on the final state: the schema config is read here so polling never pays for it, and
+    // lineage and the table breakdown share that one read.
+    private Output finish(RunContext runContext, Map<String, Connector> connectors, Map<String, ConnectorState> states)
+        throws IOException {
+        logStates(runContext.logger(), states);
+
+        var schemasByConnector = readAllSchemas(runContext, connectors.keySet());
+        emitAssets(runContext, connectors, syncStates(states), schemasByConnector);
+
+        var statesWithBreakdown = new LinkedHashMap<String, ConnectorState>();
+        for (Map.Entry<String, ConnectorState> entry : states.entrySet()) {
+            TableBreakdown breakdown = writeTableBreakdown(runContext, schemasByConnector.get(entry.getKey()));
+            statesWithBreakdown.put(
+                entry.getKey(),
+                breakdown == null
+                    ? entry.getValue()
+                    : entry.getValue().toBuilder()
+                        .tables(breakdown.getUri())
+                        .tableCount(breakdown.getTableCount())
+                        .enabledTableCount(breakdown.getEnabledTableCount())
+                        .build()
+            );
+        }
+        return Output.builder().connectors(statesWithBreakdown).build();
     }
 
     private Map<String, Connector> fetchAll(RunContext runContext, List<String> connectorIds)
@@ -266,6 +291,9 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
             .syncState(status != null ? status.getSyncState() : null)
             .setupState(status != null ? status.getSetupState() : null)
             .schemaStatus(status != null ? status.getSchemaStatus() : null)
+            .updateState(ConnectorFreshness.updateState(connector))
+            .alertCount(ConnectorFreshness.alertCount(connector))
+            .alertCodes(ConnectorFreshness.alertCodes(connector))
             .fresh(computeFresh(connector.getSucceededAt(), connector.hasFailed(), connector.getSyncFrequency(), buffer, now))
             .build();
     }
@@ -348,7 +376,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
         Map<String, ConnectorState> connectors;
     }
 
-    @Builder
+    @Builder(toBuilder = true)
     @Getter
     public static class ConnectorState {
         @Schema(
@@ -422,5 +450,41 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
             description = "True when the last sync succeeded within `syncFrequency` plus `freshnessBuffer` of now. False when stale, or the last completion was a failure. Null when Fivetran reported no `syncFrequency` for this connector, so freshness cannot be computed."
         )
         Boolean fresh;
+
+        @Schema(
+            title = "Current update state",
+            description = "As reported by Fivetran, e.g. `on_schedule`, `delayed`."
+        )
+        String updateState;
+
+        @Schema(
+            title = "Number of alerts",
+            description = "Size of the connector's `status.warnings` plus `status.tasks`."
+        )
+        int alertCount;
+
+        @Schema(
+            title = "Alert codes",
+            description = "De-duplicated codes of the connector's warnings and tasks. Alert messages are left out to keep the output bounded."
+        )
+        List<String> alertCodes;
+
+        @Schema(
+            title = "Per-table breakdown file",
+            description = "URI of an Ion file in internal storage with one row per table of the connector: `schema`, `schemaInDestination`, `schemaEnabled`, `table`, `tableInDestination`, `enabled`, `syncMode` and `enabledPatchAllowed`. Null when the schema config could not be read."
+        )
+        URI tables;
+
+        @Schema(
+            title = "Number of tables",
+            description = "Every table the connector reports, enabled or not. Null when the schema config could not be read."
+        )
+        Integer tableCount;
+
+        @Schema(
+            title = "Number of enabled tables",
+            description = "Tables that are enabled and belong to an enabled schema, i.e. the ones written to the destination. Null when the schema config could not be read."
+        )
+        Integer enabledTableCount;
     }
 }
