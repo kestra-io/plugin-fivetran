@@ -3,6 +3,7 @@ package io.kestra.plugin.fivetran;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import io.kestra.core.assets.AssetManagerFactory;
 import io.kestra.core.runners.AssetEmit;
@@ -17,6 +18,7 @@ public class TestAssetManagerFactory extends AssetManagerFactory {
     private final List<AssetEmit> allEmitted = Collections.synchronizedList(new ArrayList<>());
     private volatile boolean throwUnsupportedOperationOnEmit = false;
     private volatile RuntimeException failureOnEmit;
+    private final AtomicInteger failedEmitAttempts = new AtomicInteger();
 
     @Override
     public AssetEmitter of(boolean enable) {
@@ -24,7 +26,7 @@ public class TestAssetManagerFactory extends AssetManagerFactory {
             return new ThrowingAssetEmitter();
         }
         if (failureOnEmit != null) {
-            return new FailingAssetEmitter(failureOnEmit);
+            return new FailingAssetEmitter(failureOnEmit, failedEmitAttempts);
         }
         return new TrackingAssetEmitter(allEmitted, enable);
     }
@@ -47,10 +49,16 @@ public class TestAssetManagerFactory extends AssetManagerFactory {
         this.failureOnEmit = failure;
     }
 
+    /** Number of {@code emit()} calls rejected by {@link #failOnEmit}, across all RunContexts. */
+    public int failedEmitAttempts() {
+        return failedEmitAttempts.get();
+    }
+
     public void clear() {
         allEmitted.clear();
         throwUnsupportedOperationOnEmit = false;
         failureOnEmit = null;
+        failedEmitAttempts.set(0);
     }
 
     private static final class TrackingAssetEmitter implements AssetEmitter {
@@ -92,13 +100,16 @@ public class TestAssetManagerFactory extends AssetManagerFactory {
 
     private static final class FailingAssetEmitter implements AssetEmitter {
         private final RuntimeException failure;
+        private final AtomicInteger attempts;
 
-        FailingAssetEmitter(RuntimeException failure) {
+        FailingAssetEmitter(RuntimeException failure, AtomicInteger attempts) {
             this.failure = failure;
+            this.attempts = attempts;
         }
 
         @Override
         public void emit(AssetEmit assetEmit) {
+            attempts.incrementAndGet();
             throw failure;
         }
 

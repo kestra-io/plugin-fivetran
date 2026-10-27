@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
 import com.github.tomakehurst.wiremock.junit5.WireMockRuntimeInfo;
 import com.github.tomakehurst.wiremock.junit5.WireMockTest;
 
@@ -19,6 +20,7 @@ import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.AssetFailureBehavior;
 import io.kestra.core.runners.AssetEmit;
 import io.kestra.core.runners.RunContextFactory;
+import io.kestra.core.utils.IdUtils;
 import io.kestra.plugin.fivetran.TestAssetManagerFactory;
 
 import jakarta.inject.Inject;
@@ -219,6 +221,20 @@ class SourceInputAssetsTest {
     }
 
     @Test
+    @DisplayName("Should stop emitting a connector's assets after its first emit failure")
+    void emitFailureSkipsTheConnectorsRemainingEmits(WireMockRuntimeInfo wm) throws Exception {
+        stubAll("postgres", "{\"database\": \"shop\"}", "public", "orders", "orders");
+        assetManagerFactory.failOnEmit(new IllegalArgumentException("boom"));
+
+        var task = statusTask(wm, Property.ofValue(AssetFailureBehavior.WARN));
+        var output = task.run(runContextFactory.of(task, Map.of()));
+
+        assertThat(output.finalState().orElse(null), is(State.Type.WARNING));
+        // The connector asset fails first, so the table emit is never attempted.
+        assertThat(assetManagerFactory.failedEmitAttempts(), is(1));
+    }
+
+    @Test
     @DisplayName("Should default to WARN when assetFailureBehavior is unset or cannot be rendered")
     void unsetOrUnrenderableBehaviorWarns(WireMockRuntimeInfo wm) throws Exception {
         stubAll("postgres", "{\"database\": \"shop\"}", "public", "orders", "orders");
@@ -258,7 +274,7 @@ class SourceInputAssetsTest {
 
     private Status statusTask(WireMockRuntimeInfo wm, Property<AssetFailureBehavior> behavior) {
         return Status.builder()
-            .id("status")
+            .id("status_" + IdUtils.create())
             .type(Status.class.getName())
             .apiKey(Property.ofValue("dummy-api-key"))
             .apiSecret(Property.ofValue("dummy-api-secret"))
@@ -293,7 +309,7 @@ class SourceInputAssetsTest {
         );
     }
 
-    private static com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder json(String body) {
+    private static ResponseDefinitionBuilder json(String body) {
         return aResponse().withStatus(200).withHeader("Content-Type", "application/json").withBody(body);
     }
 

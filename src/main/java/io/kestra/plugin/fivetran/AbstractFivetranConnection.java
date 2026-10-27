@@ -519,7 +519,8 @@ public abstract class AbstractFivetranConnection extends Task {
                 continue;
             }
 
-            for (var emit : emits) {
+            for (int i = 0; i < emits.size(); i++) {
+                var emit = emits.get(i);
                 try {
                     runContext.assets().emit(emit);
                 } catch (UnsupportedOperationException e) {
@@ -531,6 +532,10 @@ public abstract class AbstractFivetranConnection extends Task {
                 } catch (Exception e) {
                     var assetId = emit.outputs().getFirst().getId();
                     failures.record(connectorId, "emit asset '" + assetId + "'", e);
+                    // An emit failure is almost always the asset queue being down rather than one bad asset,
+                    // so the rest of this connector's emits would fail the same way, one log line each.
+                    failures.skipped(connectorId, emits.size() - i - 1);
+                    break;
                 }
             }
         }
@@ -542,6 +547,7 @@ public abstract class AbstractFivetranConnection extends Task {
     private static final class AssetFailures {
         private final RunContext runContext;
         private final AssetsDeclaration declaration;
+        private AssetFailureBehavior behavior;
         private boolean warned;
 
         private AssetFailures(RunContext runContext, AssetsDeclaration declaration) {
@@ -567,16 +573,37 @@ public abstract class AbstractFivetranConnection extends Task {
             }
         }
 
-        // Core falls back to WARN when the property cannot be rendered.
-        private AssetFailureBehavior behavior() {
-            try {
-                return declaration.getAssetFailureBehavior() == null
-                    ? AssetFailureBehavior.WARN
-                    : runContext.render(declaration.getAssetFailureBehavior()).as(AssetFailureBehavior.class).orElse(AssetFailureBehavior.WARN);
-            } catch (Exception e) {
-                return AssetFailureBehavior.WARN;
+        // Only reached under WARN or IGNORE: record() has already thrown under FAIL.
+        void skipped(String connectorId, int count) {
+            if (count == 0) {
+                return;
+            }
+            var message = "Skipped the remaining " + count + " asset(s) of connector '" + connectorId + "' after an emit failure.";
+            if (behavior() == AssetFailureBehavior.WARN) {
+                runContext.logger().warn(message);
+            } else {
+                runContext.logger().debug(message);
             }
         }
+
+        // Rendered once per run, not per failure. Core falls back to WARN when the property cannot be rendered.
+        private AssetFailureBehavior behavior() {
+            if (behavior == null) {
+                try {
+                    behavior = declaration.getAssetFailureBehavior() == null
+                        ? AssetFailureBehavior.WARN
+                        : runContext.render(declaration.getAssetFailureBehavior()).as(AssetFailureBehavior.class).orElse(AssetFailureBehavior.WARN);
+                } catch (Exception e) {
+                    behavior = AssetFailureBehavior.WARN;
+                }
+            }
+            return behavior;
+        }
+    }
+
+    // GET /v2/connectors/{id} reports the type as connector_type_id; only the v1 payload carries service.
+    private static String connectorType(Connector connector) {
+        return connector.getConnectorTypeId() != null ? connector.getConnectorTypeId() : connector.getService();
     }
 
     /**
@@ -584,10 +611,6 @@ public abstract class AbstractFivetranConnection extends Task {
      * sync state have no table-level equivalent. Its id stays {@code groupId.schema} so upgrading the
      * plugin does not rename assets that already exist.
      */
-    // GET /v2/connectors/{id} reports the type as connector_type_id; only the v1 payload carries service.
-    private static String connectorType(Connector connector) {
-        return connector.getConnectorTypeId() != null ? connector.getConnectorTypeId() : connector.getService();
-    }
 
     private static Asset connectorAsset(String connectorId, Connector connector, String syncState) {
         String schema = connector.destinationSchemaName();
@@ -656,7 +679,7 @@ public abstract class AbstractFivetranConnection extends Task {
             if (schema == null || !schema.isEnabled() || schema.getTables() == null) {
                 continue;
             }
-            String sourceSchema = schemaEntry.getKey();
+            var sourceSchema = schemaEntry.getKey();
             String schemaName = schema.destinationName(sourceSchema);
             enabledSchemas++;
 
@@ -665,7 +688,7 @@ public abstract class AbstractFivetranConnection extends Task {
                 if (table == null || !table.isEnabled()) {
                     continue;
                 }
-                String sourceTable = tableEntry.getKey();
+                var sourceTable = tableEntry.getKey();
                 String tableName = table.destinationName(sourceTable);
 
                 var metadata = new LinkedHashMap<String, Object>();
@@ -779,9 +802,9 @@ public abstract class AbstractFivetranConnection extends Task {
         return id.toString();
     }
 
-    // Kept in step with the narrowest Asset.id contract this plugin compiles against: core 1.3.13 allows
-    // ^[a-zA-Z0-9][a-zA-Z0-9._-]* and rejects ':', which a later core added. Anything outside that set
-    // becomes '_' rather than emit an id the framework declares invalid.
+    // Allows ^[a-zA-Z0-9][a-zA-Z0-9._-]*, the set this plugin has always built ids from. Newer cores also
+    // accept ':', but it is still replaced so ids already emitted stay stable across upgrades. Anything
+    // outside that set becomes '_'.
     static String sanitizeSegment(String segment) {
         return DISALLOWED_ID_CHARS.matcher(segment).replaceAll("_");
     }
