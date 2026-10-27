@@ -152,7 +152,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
 
     @Schema(
         title = "Wait for sync completion",
-        description = "When true (default), poll the connector until the sync finishes to capture status and logs. Set to false to return once the sync has been triggered, without waiting for it. `succeededAt` is then null, since the sync is still running on Fivetran. With `assets.enableAuto` set, lineage is still emitted in that case, which costs two extra reads before the task returns."
+        description = "When true (default), poll the connector until the sync finishes to capture status and logs. Set to false to return once the sync has been triggered, without waiting for it. `succeededAt` is then null, since the sync is still running on Fivetran. No assets are emitted in that case, since the sync has not finished. To record lineage after the sync, add a downstream `io.kestra.plugin.fivetran.connectors.Status` task with `assets.enableAuto`."
     )
     @Builder.Default
     Property<Boolean> wait = Property.ofValue(true);
