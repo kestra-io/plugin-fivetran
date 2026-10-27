@@ -21,8 +21,7 @@ import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.assets.AssetsDeclaration;
 import io.kestra.core.models.executions.LogEntry;
 import io.kestra.core.models.property.Property;
-import io.kestra.core.queues.QueueFactoryInterface;
-import io.kestra.core.queues.QueueInterface;
+import io.kestra.core.queues.DispatchQueueInterface;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.FileSerde;
@@ -32,7 +31,6 @@ import io.kestra.core.utils.TestsUtils;
 import io.kestra.plugin.fivetran.TestAssetManagerFactory;
 
 import jakarta.inject.Inject;
-import jakarta.inject.Named;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.exactly;
@@ -95,8 +93,7 @@ class TableBreakdownTest {
     private TestAssetManagerFactory assetManagerFactory;
 
     @Inject
-    @Named(QueueFactoryInterface.WORKERTASKLOG_NAMED)
-    private QueueInterface<LogEntry> logQueue;
+    private DispatchQueueInterface<LogEntry> logQueue;
 
     @BeforeEach
     void setUp() {
@@ -229,7 +226,7 @@ class TableBreakdownTest {
         );
 
         var logs = new CopyOnWriteArrayList<LogEntry>();
-        var receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+        logQueue.addListener(logs::add);
 
         var task = statusTask(wmRuntimeInfo, List.of(CONNECTOR_ID), false, false);
         var state = task.run(TestsUtils.mockRunContext(runContextFactory, task, Map.of())).getConnectors().get(CONNECTOR_ID);
@@ -245,7 +242,6 @@ class TableBreakdownTest {
             Duration.ofSeconds(10)
         );
         assertThat(logs.stream().filter(l -> task.getId().equals(l.getTaskId())).noneMatch(l -> l.getMessage().contains("leaky-body")), is(true));
-        receive.blockLast(Duration.ofMillis(10));
     }
 
     @Test
@@ -258,7 +254,7 @@ class TableBreakdownTest {
         );
 
         var logs = new CopyOnWriteArrayList<LogEntry>();
-        var receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+        logQueue.addListener(logs::add);
 
         var task = syncTask(wmRuntimeInfo, true);
         var output = task.run(TestsUtils.mockRunContext(runContextFactory, task, Map.of()));
@@ -275,7 +271,6 @@ class TableBreakdownTest {
             Duration.ofSeconds(10)
         );
         assertThat(logs.stream().filter(l -> task.getId().equals(l.getTaskId())).noneMatch(l -> l.getMessage().contains("leaky-body")), is(true));
-        receive.blockLast(Duration.ofMillis(10));
     }
 
     @Test
