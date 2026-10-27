@@ -376,7 +376,7 @@ class TableAssetsTest {
             .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
             .connectorIds(Property.ofValue(List.of(CONNECTOR_ID)))
             .wait(Property.ofValue(false))
-            .assets(new AssetsDeclaration(Property.<Boolean> ofExpression("{{ missing.variable }}"), null, null))
+            .assets(new AssetsDeclaration(Property.<Boolean> ofExpression("{{ missing.variable }}"), null, null, null))
             .build();
 
         // The status read itself succeeded, so an unreadable lineage gate must not turn the task red.
@@ -414,8 +414,8 @@ class TableAssetsTest {
     }
 
     @Test
-    @DisplayName("Should emit table assets from Sync even when it does not wait for the sync to finish")
-    void syncWithoutWaitStillEmitsTableAssets(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+    @DisplayName("Should emit no assets from Sync when it does not wait, since the sync has not finished")
+    void syncWithoutWaitEmitsNoAssets(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         stubFor(
             get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID))
                 .willReturn(json(connectorBody(CONNECTOR_ID, SCHEMA, isoNow(-1440))))
@@ -446,7 +446,7 @@ class TableAssetsTest {
 
         task.run(runContextFactory.of(task, Map.of()));
 
-        assertThat(ids(emittedAssets()), contains(GROUP_ID + "." + SCHEMA, "analytics.salesforce.account"));
+        assertThat(assetManagerFactory.allEmitted(), hasSize(0));
     }
 
     @Test

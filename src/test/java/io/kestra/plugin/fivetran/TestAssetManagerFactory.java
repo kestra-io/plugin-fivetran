@@ -16,11 +16,15 @@ import jakarta.inject.Singleton;
 public class TestAssetManagerFactory extends AssetManagerFactory {
     private final List<AssetEmit> allEmitted = Collections.synchronizedList(new ArrayList<>());
     private volatile boolean throwUnsupportedOperationOnEmit = false;
+    private volatile RuntimeException failureOnEmit;
 
     @Override
     public AssetEmitter of(boolean enable) {
         if (throwUnsupportedOperationOnEmit) {
             return new ThrowingAssetEmitter();
+        }
+        if (failureOnEmit != null) {
+            return new FailingAssetEmitter(failureOnEmit);
         }
         return new TrackingAssetEmitter(allEmitted, enable);
     }
@@ -38,9 +42,15 @@ public class TestAssetManagerFactory extends AssetManagerFactory {
         this.throwUnsupportedOperationOnEmit = throwing;
     }
 
+    /** Makes the next emitter's {@code emit()} throw the given exception. */
+    public void failOnEmit(RuntimeException failure) {
+        this.failureOnEmit = failure;
+    }
+
     public void clear() {
         allEmitted.clear();
         throwUnsupportedOperationOnEmit = false;
+        failureOnEmit = null;
     }
 
     private static final class TrackingAssetEmitter implements AssetEmitter {
@@ -72,6 +82,24 @@ public class TestAssetManagerFactory extends AssetManagerFactory {
         @Override
         public void emit(AssetEmit assetEmit) {
             throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public List<AssetEmit> emitted() {
+            return List.of();
+        }
+    }
+
+    private static final class FailingAssetEmitter implements AssetEmitter {
+        private final RuntimeException failure;
+
+        FailingAssetEmitter(RuntimeException failure) {
+            this.failure = failure;
+        }
+
+        @Override
+        public void emit(AssetEmit assetEmit) {
+            throw failure;
         }
 
         @Override

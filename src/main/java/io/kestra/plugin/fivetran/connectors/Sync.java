@@ -6,10 +6,13 @@ import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.slf4j.Logger;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
 
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.http.HttpRequest;
@@ -20,6 +23,7 @@ import io.kestra.core.models.annotations.Metric;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.executions.metrics.Counter;
+import io.kestra.core.models.flows.State;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.runners.RunContext;
@@ -47,7 +51,8 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
         Starts a Fivetran connector sync through the Fivetran API.
         Can force-cancel and restart an in-progress sync, or re-attach to one already in progress with `reattach`.
         Waits for completion by default (up to 60 minutes) and fails if the connector reports a failure.
-        With `assets.enableAuto` set, emits one asset per table the connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph.
+        With `assets.enableAuto` set and `wait: true`, emits one asset per table the connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph, and the source table as its input: a `Table` asset for database sources (e.g. PostgreSQL, MySQL, SQL Server, Snowflake, BigQuery) or an `External` asset `connectorId.schema.table` otherwise. With `wait: false` no asset is emitted, since the sync has not finished when the task returns.
+        If building or emitting an asset fails, `assets.assetFailureBehavior` applies: `FAIL` fails the task, `WARN` (the default) ends it in WARNING, `IGNORE` only logs at debug level.
         Whatever `assets.enableAuto` is set to, reads the connector's schema config once (one extra GET) to output a per-table breakdown file (`tables`, `tableCount`, `enabledTableCount`) and a `freshness` summary with the connector's alert codes; a failed schema read logs a warning and never fails the task.
         """
 )
@@ -263,7 +268,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
 
         if (!runContext.render(this.wait).as(Boolean.class).orElseThrow()) {
             var outputBuilder = Output.builder().connectorId(connectorId).reattached(reattached);
-            return withBreakdown(runContext, connectorId, previousConnector, ConnectorFreshness.from(previousConnector, null), outputBuilder);
+            return withBreakdown(runContext, connectorId, previousConnector, ConnectorFreshness.from(previousConnector, null), outputBuilder, false);
         }
 
         ZonedDateTime previousCompletedDate = previousConnector.completedDate();
@@ -323,7 +328,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             .connectorId(connectorId)
             .succeededAt(finalConnector.getSucceededAt())
             .reattached(reattached);
-        return withBreakdown(runContext, connectorId, finalConnector, ConnectorFreshness.from(finalConnector, true), outputBuilder);
+        return withBreakdown(runContext, connectorId, finalConnector, ConnectorFreshness.from(finalConnector, true), outputBuilder, true);
     }
 
     // The schema config is read once and shared by lineage and the table breakdown.
@@ -332,17 +337,21 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         String connectorId,
         Connector connector,
         ConnectorFreshness freshness,
-        Output.OutputBuilder outputBuilder) throws IOException {
+        Output.OutputBuilder outputBuilder,
+        boolean emitAssets) throws IOException {
         var schemas = readSchemas(runContext, connectorId);
 
-        var syncStates = new HashMap<String, String>();
-        syncStates.put(connectorId, freshness.getSyncState());
-        this.emitAssets(
-            runContext,
-            Map.of(connectorId, connector),
-            syncStates,
-            schemas != null ? Map.of(connectorId, schemas) : Map.of()
-        );
+        // With `wait: false` the connector is the pre-trigger snapshot, which describes no finished sync.
+        if (emitAssets) {
+            var syncStates = new HashMap<String, String>();
+            syncStates.put(connectorId, freshness.getSyncState());
+            this.emitAssets(
+                runContext,
+                Map.of(connectorId, connector),
+                syncStates,
+                schemas != null ? Map.of(connectorId, schemas) : Map.of()
+            ).ifPresent(outputBuilder::state);
+        }
 
         outputBuilder.freshness(freshness);
         var breakdown = writeTableBreakdown(runContext, schemas);
@@ -447,5 +456,14 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             description = "Tables that are enabled and belong to an enabled schema, i.e. the ones written to the destination. Null when the schema config could not be read."
         )
         Integer enabledTableCount;
+
+        @JsonIgnore
+        @Getter(AccessLevel.NONE)
+        State.Type state;
+
+        @Override
+        public Optional<State.Type> finalState() {
+            return Optional.ofNullable(state);
+        }
     }
 }

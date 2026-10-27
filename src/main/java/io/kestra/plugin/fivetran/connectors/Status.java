@@ -7,17 +7,21 @@ import java.time.ZonedDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.http.client.HttpClientException;
 import io.kestra.core.models.annotations.Example;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
+import io.kestra.core.models.flows.State;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.runners.RunContext;
@@ -46,7 +50,8 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
         By default (`wait: true`), polls until every connector is fresh so downstream tasks only run once the underlying data is up to date; set `wait: false` for a single read-only snapshot.
         Reads each connector's schema config once, on the final state and whatever `assets.enableAuto` is set to (one extra GET per connector), to output a per-table breakdown file (`tables`, `tableCount`, `enabledTableCount`); a failed schema read logs a warning and never fails the task.
         It also reports `updateState`, `alertCount` and `alertCodes`.
-        With `assets.enableAuto` set, emits one asset per table each connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph.
+        With `assets.enableAuto` set, emits one asset per table each connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph, and the source table as its input: a `Table` asset for database sources (e.g. PostgreSQL, MySQL, SQL Server, Snowflake, BigQuery) or an `External` asset `connectorId.schema.table` otherwise.
+        If building or emitting an asset fails, `assets.assetFailureBehavior` applies: `FAIL` fails the task, `WARN` (the default) ends it in WARNING, `IGNORE` only logs at debug level.
         """
 )
 @Plugin(
@@ -246,7 +251,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
         logStates(runContext.logger(), states);
 
         var schemasByConnector = readAllSchemas(runContext, connectors.keySet());
-        emitAssets(runContext, connectors, syncStates(states), schemasByConnector);
+        var assetState = emitAssets(runContext, connectors, syncStates(states), schemasByConnector);
 
         var statesWithBreakdown = new LinkedHashMap<String, ConnectorState>();
         for (var entry : states.entrySet()) {
@@ -262,7 +267,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
                         .build()
             );
         }
-        return Output.builder().connectors(statesWithBreakdown).build();
+        return Output.builder().connectors(statesWithBreakdown).state(assetState.orElse(null)).build();
     }
 
     private Map<String, Connector> fetchAll(RunContext runContext, List<String> connectorIds)
@@ -380,6 +385,15 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
             description = "Map of connector ID to its current status, in the order the IDs were requested."
         )
         Map<String, ConnectorState> connectors;
+
+        @JsonIgnore
+        @Getter(AccessLevel.NONE)
+        State.Type state;
+
+        @Override
+        public Optional<State.Type> finalState() {
+            return Optional.ofNullable(state);
+        }
     }
 
     @Builder(toBuilder = true)

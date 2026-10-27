@@ -11,6 +11,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 import jakarta.validation.Valid;
 import lombok.Builder;
+import lombok.ToString;
 import lombok.Value;
 import lombok.experimental.SuperBuilder;
 import lombok.extern.jackson.Jacksonized;
@@ -76,6 +77,15 @@ public class Connector {
 
     @JsonProperty("schedule_type")
     String scheduleType;
+
+    @JsonProperty("service")
+    String service;
+
+    // Source connection settings, secrets are masked by Fivetran but may not always be. Kept out of
+    // toString and never logged; only SourceLocation reads its location keys.
+    @JsonProperty("config")
+    @ToString.Exclude
+    Map<String, Object> config;
 
     @Builder.Default
     Map<String, Object> properties = new HashMap<>();
