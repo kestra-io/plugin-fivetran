@@ -25,7 +25,6 @@ import io.kestra.core.utils.Await;
 import io.kestra.plugin.fivetran.AbstractFivetranConnection;
 import io.kestra.plugin.fivetran.models.Connector;
 import io.kestra.plugin.fivetran.models.ConnectorStatusResponse;
-import io.kestra.plugin.fivetran.models.TableBreakdown;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotNull;
@@ -41,7 +40,14 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 @NoArgsConstructor
 @Schema(
     title = "Read the status of one or more Fivetran connectors, optionally gating on freshness",
-    description = "Reads each connector's current status through a single GET call per connector. Never triggers a sync. By default (`wait: true`), polls until every connector is fresh so downstream tasks only run once the underlying data is up to date; set `wait: false` for a single read-only snapshot. Reads each connector's schema config once, on the final state and whatever `assets.enableAuto` is set to (one extra GET per connector), to output a per-table breakdown file (`tables`, `tableCount`, `enabledTableCount`); a failed schema read logs a warning and never fails the task. It also reports `updateState`, `alertCount` and `alertCodes`. With `assets.enableAuto` set, emits one asset per table each connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph."
+    description = """
+        Reads each connector's current status through a single GET call per connector.
+        Never triggers a sync.
+        By default (`wait: true`), polls until every connector is fresh so downstream tasks only run once the underlying data is up to date; set `wait: false` for a single read-only snapshot.
+        Reads each connector's schema config once, on the final state and whatever `assets.enableAuto` is set to (one extra GET per connector), to output a per-table breakdown file (`tables`, `tableCount`, `enabledTableCount`); a failed schema read logs a warning and never fails the task.
+        It also reports `updateState`, `alertCount` and `alertCodes`.
+        With `assets.enableAuto` set, emits one asset per table each connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph.
+        """
 )
 @Plugin(
     examples = {
@@ -243,8 +249,8 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
         emitAssets(runContext, connectors, syncStates(states), schemasByConnector);
 
         var statesWithBreakdown = new LinkedHashMap<String, ConnectorState>();
-        for (Map.Entry<String, ConnectorState> entry : states.entrySet()) {
-            TableBreakdown breakdown = writeTableBreakdown(runContext, schemasByConnector.get(entry.getKey()));
+        for (var entry : states.entrySet()) {
+            var breakdown = writeTableBreakdown(runContext, schemasByConnector.get(entry.getKey()));
             statesWithBreakdown.put(
                 entry.getKey(),
                 breakdown == null
@@ -447,7 +453,11 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
 
         @Schema(
             title = "Whether the connector's last sync is fresh",
-            description = "True when the last sync succeeded within `syncFrequency` plus `freshnessBuffer` of now. False when stale, or the last completion was a failure. Null when Fivetran reported no `syncFrequency` for this connector, so freshness cannot be computed."
+            description = """
+                True when the last sync succeeded within `syncFrequency` plus `freshnessBuffer` of now.
+                False when stale, or the last completion was a failure.
+                Null when Fivetran reported no `syncFrequency` for this connector, so freshness cannot be computed.
+                """
         )
         Boolean fresh;
 
@@ -471,7 +481,10 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
 
         @Schema(
             title = "Per-table breakdown file",
-            description = "URI of an Ion file in internal storage with one row per table of the connector: `schema`, `schemaInDestination`, `schemaEnabled`, `table`, `tableInDestination`, `enabled`, `syncMode` and `enabledPatchAllowed`. Null when the schema config could not be read."
+            description = """
+                URI of an Ion file in internal storage with one row per table of the connector: `schema`, `schemaInDestination`, `schemaEnabled`, `table`, `tableInDestination`, `enabled`, `syncMode` and `enabledPatchAllowed`.
+                Null when the schema config could not be read.
+                """
         )
         URI tables;
 

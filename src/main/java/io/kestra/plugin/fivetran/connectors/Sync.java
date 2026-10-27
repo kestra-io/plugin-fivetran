@@ -1,5 +1,6 @@
 package io.kestra.plugin.fivetran.connectors;
 
+import java.io.IOException;
 import java.net.URI;
 import java.time.Duration;
 import java.time.ZonedDateTime;
@@ -25,10 +26,8 @@ import io.kestra.core.runners.RunContext;
 import io.kestra.core.utils.Await;
 import io.kestra.plugin.fivetran.AbstractFivetranConnection;
 import io.kestra.plugin.fivetran.models.Connector;
-import io.kestra.plugin.fivetran.models.ConnectorSchema;
 import io.kestra.plugin.fivetran.models.ConnectorStatusResponse;
 import io.kestra.plugin.fivetran.models.SyncResponse;
-import io.kestra.plugin.fivetran.models.TableBreakdown;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotNull;
@@ -44,7 +43,13 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 @NoArgsConstructor
 @Schema(
     title = "Trigger and optionally watch connector sync",
-    description = "Starts a Fivetran connector sync through the Fivetran API. Can force-cancel and restart an in-progress sync, or re-attach to one already in progress with `reattach`. Waits for completion by default (up to 60 minutes) and fails if the connector reports a failure. With `assets.enableAuto` set, emits one asset per table the connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph. Whatever `assets.enableAuto` is set to, reads the connector's schema config once (one extra GET) to output a per-table breakdown file (`tables`, `tableCount`, `enabledTableCount`) and a `freshness` summary with the connector's alert codes; a failed schema read logs a warning and never fails the task."
+    description = """
+        Starts a Fivetran connector sync through the Fivetran API.
+        Can force-cancel and restart an in-progress sync, or re-attach to one already in progress with `reattach`.
+        Waits for completion by default (up to 60 minutes) and fails if the connector reports a failure.
+        With `assets.enableAuto` set, emits one asset per table the connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph.
+        Whatever `assets.enableAuto` is set to, reads the connector's schema config once (one extra GET) to output a per-table breakdown file (`tables`, `tableCount`, `enabledTableCount`) and a `freshness` summary with the connector's alert codes; a failed schema read logs a warning and never fails the task.
+        """
 )
 @Plugin(
     examples = {
@@ -77,6 +82,29 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
                     connectorId: "connector_id"
                     assets:
                       enableAuto: true
+                """
+        ),
+        @Example(
+            full = true,
+            title = "Sync a connector, then read its freshness and per-table breakdown.",
+            code = """
+                id: fivetran_sync_with_breakdown
+                namespace: company.team
+
+                tasks:
+                  - id: sync
+                    type: io.kestra.plugin.fivetran.connectors.Sync
+                    apiKey: "{{ secret('FIVETRAN_API_KEY') }}"
+                    apiSecret: "{{ secret('FIVETRAN_API_SECRET') }}"
+                    connectorId: "connector_id"
+                    wait: true
+
+                  - id: report
+                    type: io.kestra.plugin.core.log.Log
+                    message: |
+                      Alerts: {{ outputs.sync.freshness.alertCount }},
+                      enabled tables: {{ outputs.sync.enabledTableCount }} of {{ outputs.sync.tableCount }},
+                      breakdown file: {{ outputs.sync.tables }}
                 """
         ),
         @Example(
@@ -304,10 +332,10 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         String connectorId,
         Connector connector,
         ConnectorFreshness freshness,
-        Output.OutputBuilder outputBuilder) throws Exception {
-        Map<String, ConnectorSchema> schemas = readSchemas(runContext, connectorId);
+        Output.OutputBuilder outputBuilder) throws IOException {
+        var schemas = readSchemas(runContext, connectorId);
 
-        Map<String, String> syncStates = new HashMap<>();
+        var syncStates = new HashMap<String, String>();
         syncStates.put(connectorId, freshness.getSyncState());
         this.emitAssets(
             runContext,
@@ -317,7 +345,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         );
 
         outputBuilder.freshness(freshness);
-        TableBreakdown breakdown = writeTableBreakdown(runContext, schemas);
+        var breakdown = writeTableBreakdown(runContext, schemas);
         if (breakdown != null) {
             outputBuilder
                 .tables(breakdown.getUri())
@@ -378,7 +406,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
 
         @Schema(
             title = "Timestamp of the sync this task waited for",
-            description = "Null when `wait` is false, since the sync is still running on Fivetran when the task returns."
+            description = "The completion of the sync this task observed, as reported by Fivetran. Null when `wait` is false, since the sync is still running on Fivetran when the task returns. See `freshness.succeededAt` for the connector's last known success."
         )
         ZonedDateTime succeededAt;
 
@@ -390,13 +418,21 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
 
         @Schema(
             title = "Connector freshness",
-            description = "State of the connector when the task returned. With `wait: true` it is read after the sync completed. With `wait: false` it is the snapshot taken before the sync was triggered, so `fresh` is null."
+            description = """
+                State of the connector when the task returned.
+                With `wait: true` it is read after the sync completed.
+                With `wait: false` it is the snapshot taken before the sync was triggered, so `fresh` is null and `freshness.succeededAt` is the connector's last known success, which predates the triggered sync.
+                The top-level `succeededAt` is the completion of the sync this task observed.
+                """
         )
         ConnectorFreshness freshness;
 
         @Schema(
             title = "Per-table breakdown file",
-            description = "URI of an Ion file in internal storage with one row per table of the connector: `schema`, `schemaInDestination`, `schemaEnabled`, `table`, `tableInDestination`, `enabled`, `syncMode` and `enabledPatchAllowed`. Null when the schema config could not be read."
+            description = """
+                URI of an Ion file in internal storage with one row per table of the connector: `schema`, `schemaInDestination`, `schemaEnabled`, `table`, `tableInDestination`, `enabled`, `syncMode` and `enabledPatchAllowed`.
+                Null when the schema config could not be read.
+                """
         )
         URI tables;
 

@@ -1,7 +1,6 @@
 package io.kestra.plugin.fivetran;
 
 import java.io.IOException;
-import java.io.OutputStream;
 import java.net.ConnectException;
 import java.net.SocketTimeoutException;
 import java.net.URI;
@@ -322,24 +321,30 @@ public abstract class AbstractFivetranConnection extends Task {
             return fetchConnectorSchemas(runContext, connectorId);
         } catch (Exception e) {
             // Status and exception type only: the response body is never logged.
-            var reason = e instanceof HttpClientResponseException hcre && hcre.getResponse() != null
-                ? "HTTP " + hcre.getResponse().getStatus().getCode()
-                : e.getClass().getSimpleName();
+            var status = e instanceof HttpClientResponseException hcre && hcre.getResponse() != null
+                ? hcre.getResponse().getStatus().getCode()
+                : null;
+            var reason = status != null ? "HTTP " + status : e.getClass().getSimpleName();
+            var consequence = lineageEnabledQuietly(runContext)
+                ? "skipping the table breakdown and table-level assets"
+                : "skipping the table breakdown";
+            var hint = status != null && (status == 401 || status == 403)
+                ? " Check that the API key may read connector schemas."
+                : "";
             runContext.logger().warn(
-                "Could not read the schema config of connector '{}' ({}), skipping the table breakdown and table-level assets. Check that the API key may read connector schemas.",
+                "Could not read the schema config of connector '{}' ({}), {}.{}",
                 connectorId,
-                reason
+                reason,
+                consequence,
+                hint
             );
             return null;
         }
     }
 
-    /**
-     * Reads the schema config of each connector, leaving out the ones whose read failed.
-     */
     protected Map<String, Map<String, ConnectorSchema>> readAllSchemas(RunContext runContext, Collection<String> connectorIds) {
         var schemasByConnector = new LinkedHashMap<String, Map<String, ConnectorSchema>>();
-        for (String connectorId : connectorIds) {
+        for (var connectorId : connectorIds) {
             var schemas = readSchemas(runContext, connectorId);
             if (schemas != null) {
                 schemasByConnector.put(connectorId, schemas);
@@ -362,14 +367,14 @@ public abstract class AbstractFivetranConnection extends Task {
 
         var rows = new ArrayList<Map<String, Object>>();
         var enabledTableCount = 0;
-        for (Map.Entry<String, ConnectorSchema> schemaEntry : schemas.entrySet()) {
+        for (var schemaEntry : schemas.entrySet()) {
             var schema = schemaEntry.getValue();
             if (schema == null || schema.getTables() == null) {
                 continue;
             }
             var schemaInDestination = schema.destinationName(schemaEntry.getKey());
 
-            for (Map.Entry<String, SchemaTable> tableEntry : schema.getTables().entrySet()) {
+            for (var tableEntry : schema.getTables().entrySet()) {
                 var table = tableEntry.getValue();
                 if (table == null) {
                     continue;
@@ -393,7 +398,7 @@ public abstract class AbstractFivetranConnection extends Task {
         }
 
         var tempFile = runContext.workingDir().createTempFile(".ion").toFile();
-        try (OutputStream output = Files.newOutputStream(tempFile.toPath())) {
+        try (var output = Files.newOutputStream(tempFile.toPath())) {
             FileSerde.writeAll(output, Flux.fromIterable(rows)).block();
         }
 
@@ -426,6 +431,15 @@ public abstract class AbstractFivetranConnection extends Task {
      * Whether automatic asset emission is enabled on this task. Checked before any lineage read so a task
      * with assets off never pays for the extra destination and schema calls.
      */
+    // The warning path must not throw, so an expression that fails to render counts as lineage off.
+    private boolean lineageEnabledQuietly(RunContext runContext) {
+        try {
+            return assetsEnabled(runContext);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     protected boolean assetsEnabled(RunContext runContext) throws IllegalVariableEvaluationException {
         AssetsDeclaration declaration = this.getAssets();
         return declaration != null
@@ -556,7 +570,7 @@ public abstract class AbstractFivetranConnection extends Task {
 
         var assets = new ArrayList<Asset>();
         var enabledSchemas = 0;
-        for (Map.Entry<String, ConnectorSchema> schemaEntry : schemas.entrySet()) {
+        for (var schemaEntry : schemas.entrySet()) {
             ConnectorSchema schema = schemaEntry.getValue();
             // A disabled schema or table is not written to the destination, so it is not an asset.
             if (schema == null || !schema.isEnabled() || schema.getTables() == null) {
@@ -565,7 +579,7 @@ public abstract class AbstractFivetranConnection extends Task {
             String schemaName = schema.destinationName(schemaEntry.getKey());
             enabledSchemas++;
 
-            for (Map.Entry<String, SchemaTable> tableEntry : schema.getTables().entrySet()) {
+            for (var tableEntry : schema.getTables().entrySet()) {
                 SchemaTable table = tableEntry.getValue();
                 if (table == null || !table.isEnabled()) {
                     continue;

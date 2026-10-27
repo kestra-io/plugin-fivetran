@@ -7,7 +7,6 @@ import java.util.Objects;
 
 import io.kestra.plugin.fivetran.models.Alert;
 import io.kestra.plugin.fivetran.models.Connector;
-import io.kestra.plugin.fivetran.models.ConnectorStatusResponse;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Builder;
@@ -40,7 +39,10 @@ public class ConnectorFreshness {
     Boolean paused;
 
     @Schema(
-        title = "Timestamp of the last successful sync"
+        title = "Timestamp of the last successful sync",
+        description = """
+            The connector's last known success, taken from the connector snapshot. With `wait: false` it predates the sync this task triggered; use the top-level `succeededAt` for the sync the task itself observed.
+            """
     )
     ZonedDateTime succeededAt;
 
@@ -56,7 +58,10 @@ public class ConnectorFreshness {
 
     @Schema(
         title = "Whether the connector's data is fresh",
-        description = "True when `wait` is true, since a sync that just succeeded is fresh by definition. Null when `wait` is false, because the sync is still running."
+        description = """
+            True when `wait` is true, since a sync that just succeeded is fresh by definition.
+            Null when `wait` is false, because the sync is still running.
+            """
     )
     Boolean fresh;
 
@@ -68,7 +73,10 @@ public class ConnectorFreshness {
 
     @Schema(
         title = "Alert codes",
-        description = "De-duplicated codes of the connector's warnings and tasks. Alert messages are left out to keep the output bounded."
+        description = """
+            De-duplicated codes of the connector's warnings and tasks.
+            Alert messages are left out to keep the output bounded.
+            """
     )
     List<String> alertCodes;
 
@@ -90,7 +98,7 @@ public class ConnectorFreshness {
     }
 
     static String updateState(Connector connector) {
-        ConnectorStatusResponse status = connector.getStatus();
+        var status = connector.getStatus();
         return status != null ? status.getUpdateState() : null;
     }
 

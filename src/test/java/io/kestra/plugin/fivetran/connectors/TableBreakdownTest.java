@@ -27,6 +27,7 @@ import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.FileSerde;
 import io.kestra.core.utils.Await;
+import io.kestra.core.utils.IdUtils;
 import io.kestra.core.utils.TestsUtils;
 import io.kestra.plugin.fivetran.TestAssetManagerFactory;
 
@@ -239,11 +240,41 @@ class TableBreakdownTest {
         assertThat(state.getFresh(), is(true));
 
         Await.until(
-            () -> logs.stream().anyMatch(l -> l.getMessage().contains("Could not read the schema config of connector '" + CONNECTOR_ID + "' (HTTP 500)")),
+            () -> logs.stream().anyMatch(l -> task.getId().equals(l.getTaskId()) && l.getMessage().contains("Could not read the schema config of connector '" + CONNECTOR_ID + "' (HTTP 500)")),
             Duration.ofMillis(50),
             Duration.ofSeconds(10)
         );
-        assertThat(logs.stream().noneMatch(l -> l.getMessage().contains("leaky-body")), is(true));
+        assertThat(logs.stream().filter(l -> task.getId().equals(l.getTaskId())).noneMatch(l -> l.getMessage().contains("leaky-body")), is(true));
+        receive.blockLast(Duration.ofMillis(10));
+    }
+
+    @Test
+    @DisplayName("Should succeed with null breakdown fields and a warning naming the status, not the body, when Sync cannot read schemas")
+    void syncSurvivesAFailedSchemaRead(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubSyncScenario();
+        stubFor(
+            get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/schemas"))
+                .willReturn(aResponse().withStatus(500).withBody("{\"code\": \"InternalError\", \"message\": \"leaky-body\"}"))
+        );
+
+        var logs = new CopyOnWriteArrayList<LogEntry>();
+        var receive = TestsUtils.receive(logQueue, l -> logs.add(l.getLeft()));
+
+        var task = syncTask(wmRuntimeInfo, true);
+        var output = task.run(TestsUtils.mockRunContext(runContextFactory, task, Map.of()));
+
+        assertThat(output.getFreshness().getFresh(), is(true));
+        assertThat(output.getTables(), nullValue());
+        assertThat(output.getTableCount(), nullValue());
+        assertThat(output.getEnabledTableCount(), nullValue());
+
+        var expected = "Could not read the schema config of connector '" + CONNECTOR_ID + "' (HTTP 500)";
+        Await.until(
+            () -> logs.stream().anyMatch(l -> task.getId().equals(l.getTaskId()) && l.getMessage().contains(expected)),
+            Duration.ofMillis(50),
+            Duration.ofSeconds(10)
+        );
+        assertThat(logs.stream().filter(l -> task.getId().equals(l.getTaskId())).noneMatch(l -> l.getMessage().contains("leaky-body")), is(true));
         receive.blockLast(Duration.ofMillis(10));
     }
 
@@ -322,7 +353,7 @@ class TableBreakdownTest {
 
     private Sync syncTask(WireMockRuntimeInfo wmRuntimeInfo, boolean wait) {
         return Sync.builder()
-            .id("sync")
+            .id("sync_" + IdUtils.create())
             .type(Sync.class.getName())
             .apiKey(Property.ofValue("dummy-api-key"))
             .apiSecret(Property.ofValue("dummy-api-secret"))
@@ -336,7 +367,7 @@ class TableBreakdownTest {
 
     private Status statusTask(WireMockRuntimeInfo wmRuntimeInfo, List<String> connectorIds, boolean wait, boolean assets) {
         var builder = Status.builder()
-            .id("status")
+            .id("status_" + IdUtils.create())
             .type(Status.class.getName())
             .apiKey(Property.ofValue("dummy-api-key"))
             .apiSecret(Property.ofValue("dummy-api-secret"))

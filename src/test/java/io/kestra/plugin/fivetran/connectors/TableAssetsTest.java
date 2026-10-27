@@ -267,7 +267,7 @@ class TableAssetsTest {
 
     @Test
     @DisplayName("Should make no destination call when assets.enableAuto is unset")
-    void makesNoLineageCallWhenAssetsAreDisabled(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+    void makesNoDestinationCallWhenAssetsAreUnset(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         stubConnector(wmRuntimeInfo);
         stubDestination("""
             {"database": "analytics"}

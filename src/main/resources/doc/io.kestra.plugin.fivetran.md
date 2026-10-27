@@ -24,6 +24,23 @@ By default (`wait: true`), `Status` acts as a freshness gate: it polls every `po
 
 Both tasks also output a per-table breakdown of each connector: `tables` (a `kestra://` URI of an Ion file with one row per table), `tableCount` and `enabledTableCount`. Each row holds `schema`, `schemaInDestination`, `schemaEnabled`, `table`, `tableInDestination`, `enabled`, `syncMode` and `enabledPatchAllowed`. Disabled schemas and tables are included with their flags; `enabledTableCount` only counts tables that are enabled in an enabled schema. On `Status` these sit on each entry of `connectors`, alongside `updateState`, `alertCount` and `alertCodes`. Pass `{{ outputs.<taskId>.tables }}` to any downstream task that reads an Ion file, such as the Serdes conversion tasks.
 
+For example, sync a connector, then log its alert count and table counts and hand the breakdown file to a downstream task:
+
+```yaml
+tasks:
+  - id: sync
+    type: io.kestra.plugin.fivetran.connectors.Sync
+    apiKey: "{{ secret('FIVETRAN_API_KEY') }}"
+    apiSecret: "{{ secret('FIVETRAN_API_SECRET') }}"
+    connectorId: "connector_id"
+
+  - id: report
+    type: io.kestra.plugin.core.log.Log
+    message: "{{ outputs.sync.freshness.alertCount }} alerts, {{ outputs.sync.enabledTableCount }} enabled tables, breakdown at {{ outputs.sync.tables }}"
+```
+
+On `Sync`, the top-level `succeededAt` is the completion of the sync the task observed (null with `wait: false`), while `freshness.succeededAt` is the connector's last known success from the snapshot, which with `wait: false` predates the triggered sync.
+
 The breakdown costs one extra `GET /v2/connectors/{id}/schemas` per connector per run, even when `assets.enableAuto` is off. The call is shared with lineage, so enabling lineage adds no second one. If the read fails (for example an API key without permission to read schemas), the task logs a warning naming the connector and HTTP status and still succeeds, with `tables`, `tableCount` and `enabledTableCount` null. There is no property to turn the read off.
 
 When `assets.enableAuto` is set, both `Sync` and `Status` emit lineage. Emitting from both matters because a connector on Fivetran's own schedule is never triggered through `Sync`, and one driven from Kestra is often never read through `Status`.
