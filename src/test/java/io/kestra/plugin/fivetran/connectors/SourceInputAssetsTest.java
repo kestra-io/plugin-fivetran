@@ -118,6 +118,20 @@ class SourceInputAssetsTest {
     }
 
     @Test
+    @DisplayName("Should fall back to the v1 service field when connector_type_id is absent")
+    void serviceFallbackWhenNoConnectorTypeId(WireMockRuntimeInfo wm) throws Exception {
+        stubAll("postgres", "{\"database\": \"shop\"}", "public", "orders", "orders");
+        stubFor(get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID)).willReturn(json(connectorBody("service", "postgres", "{\"database\": \"shop\"}"))));
+
+        var task = statusTask(wm, null);
+        task.run(runContextFactory.of(task, Map.of()));
+
+        var emit = tableEmits().getFirst();
+        assertThat(emit.inputs().getFirst().id(), is("shop.public.orders"));
+        assertThat(emit.outputs().getFirst().getMetadata().get("service"), is("postgres"));
+    }
+
+    @Test
     @DisplayName("Should emit the connector Dataset alone, then one bundle per table")
     void oneEmitPerTableAndADatasetEmit(WireMockRuntimeInfo wm) throws Exception {
         stubAll("postgres", "{\"database\": \"shop\"}", "public", "orders", "orders");
@@ -290,6 +304,10 @@ class SourceInputAssetsTest {
     }
 
     private static String connectorBody(String service, String config) {
+        return connectorBody("connector_type_id", service, config);
+    }
+
+    private static String connectorBody(String typeKey, String service, String config) {
         return """
             {
               "code": "Success",
@@ -310,7 +328,7 @@ class SourceInputAssetsTest {
             }
             """.formatted(
             CONNECTOR_ID,
-            service != null ? "\"service\": \"" + service + "\"," : "",
+            service != null ? "\"" + typeKey + "\": \"" + service + "\"," : "",
             config != null ? "\"config\": " + config + "," : "",
             SUCCEEDED_AT,
             GROUP_ID

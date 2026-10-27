@@ -584,6 +584,11 @@ public abstract class AbstractFivetranConnection extends Task {
      * sync state have no table-level equivalent. Its id stays {@code groupId.schema} so upgrading the
      * plugin does not rename assets that already exist.
      */
+    // GET /v2/connectors/{id} reports the type as connector_type_id; only the v1 payload carries service.
+    private static String connectorType(Connector connector) {
+        return connector.getConnectorTypeId() != null ? connector.getConnectorTypeId() : connector.getService();
+    }
+
     private static Asset connectorAsset(String connectorId, Connector connector, String syncState) {
         String schema = connector.destinationSchemaName();
 
@@ -635,7 +640,7 @@ public abstract class AbstractFivetranConnection extends Task {
             return List.of();
         }
 
-        var source = SourceLocation.resolve(connector.getService(), connector.getConfig());
+        var source = SourceLocation.resolve(connectorType(connector), connector.getConfig());
         if (source.isEmpty()) {
             runContext.logger().debug(
                 "Connector '{}' has no resolvable database source location, its source tables are emitted as External assets.",
@@ -676,7 +681,7 @@ public abstract class AbstractFivetranConnection extends Task {
                 metadata.put("connectorId", connectorId);
                 putIfNotNull(metadata, "lastSyncedAt", connector.getSucceededAt() != null ? connector.getSucceededAt().toString() : null);
                 putIfNotNull(metadata, "syncState", syncState);
-                putIfNotNull(metadata, "service", connector.getService());
+                putIfNotNull(metadata, "service", connectorType(connector));
                 metadata.put("sourceSchema", sourceSchema);
                 metadata.put("sourceTable", sourceTable);
                 putIfNotNull(metadata, "syncMode", table.getSyncMode());
