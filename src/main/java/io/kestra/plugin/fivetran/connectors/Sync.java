@@ -287,9 +287,12 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
                         throw e;
                     }
 
+                    // A non-forced trigger while a sync is in flight is queued behind it, so the first completion
+                    // seen while still syncing belongs to that earlier sync, not ours.
                     if (
                         current.completedDate() != null
                             && (previousCompletedDate == null || current.completedDate().isAfter(previousCompletedDate))
+                            && !isSyncing(current)
                     ) {
                         return current;
                     }
