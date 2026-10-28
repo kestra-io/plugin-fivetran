@@ -484,7 +484,17 @@ class SyncRetryTest {
             .build();
 
         HttpClientRequestException thrown = assertThrows(HttpClientRequestException.class, () -> task.run(runContext()));
-        assertTrue(thrown.getMessage().contains("Connection refused"), "message was: " + thrown.getMessage());
+        // The JDK localizes "Connection refused", so match the cause type rather than the message.
+        assertTrue(hasCause(thrown, ConnectException.class), "cause chain of: " + thrown);
+    }
+
+    private static boolean hasCause(Throwable throwable, Class<? extends Throwable> type) {
+        for (Throwable cause = throwable; cause != null; cause = cause.getCause()) {
+            if (type.isInstance(cause)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     @Test

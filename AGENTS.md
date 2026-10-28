@@ -59,7 +59,7 @@ Rules:
 - Never render the `tables` file rows (only the counts; the slot props carry its URI, not its content), alert messages, connector `config` or destination data. None of it is in the outputs, and the settings reader never touches `apiKey`/`apiSecret`.
 - `height`/`heightWithExecution` in `ui/vite.config.ts` must match the rendered row counts (about 56px plus 31.5px per row). Update them when a row is added or removed.
 - `ui/vite.config.ts` caps Module Federation chunk names: with the `io.kestra.plugin.fivetran` remote name the longest virtual chunk name is 256 characters, one over the 255-byte file name limit on Linux, and the build fails without the cap.
-- Gradle runs `npm install` and `npm run build -- --outDir ../src/main/resources/plugin-ui` (tasks `npmInstallUI` and `buildUI`) before packaging, so building the plugin needs Node.js 18+. `src/main/resources/plugin-ui/` is build output and is git-ignored. The plugin targets Kestra 2.0.x (Java 25) and no longer supports 1.3.x.
+- Gradle runs `npm install` and `npm run build -- --outDir ../src/main/resources/plugin-ui` (tasks `npmInstallUI` and `buildUI`) before packaging, so building the plugin needs Node.js 18+. `src/main/resources/plugin-ui/` is build output and is git-ignored. The plugin targets Kestra 2.1.x (Java 25) and no longer supports 2.0.x: plugin endpoints, the Artifacts tab, the asset card footer, asset `partOf` and task checkpoints are 2.1 APIs.
 - Checks: `npm test`, `npm run lint` and `npm run format` in `ui/`.
 
 ### Project Structure
