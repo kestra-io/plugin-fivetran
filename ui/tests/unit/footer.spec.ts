@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createI18n } from "vue-i18n";
 import AssetFreshnessFooter from "../../src/components/AssetFreshnessFooter.vue";
-import { formatAgo } from "../../src/composables/format";
+import { ageOf } from "../../src/composables/format";
 
 const NOW = new Date("2024-01-15T12:00:00Z").getTime();
 
@@ -34,6 +34,24 @@ describe("AssetFreshnessFooter", () => {
         expect(wrapper.find(".fivetran-footer__state").text()).toBe("· scheduled");
     });
 
+    test("keeps the age current while the graph stays open", async () => {
+        const wrapper = footer({ connectorId: "conn_a", lastSyncedAt: "2024-01-15T11:59:30Z" });
+        expect(wrapper.find(".fivetran-footer__text").text()).toBe("Synced just now");
+
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+        expect(wrapper.find(".fivetran-footer__text").text()).toBe("Synced 5 min ago");
+    });
+
+    test("stops ticking once unmounted", () => {
+        const wrapper = footer({ connectorId: "conn_a", lastSyncedAt: "2024-01-15T11:59:30Z" });
+        expect(vi.getTimerCount()).toBe(1);
+
+        wrapper.unmount();
+
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
     test("renders nothing on an asset another plugin last wrote, or without a sync date", () => {
         expect(footer({ lastSyncedAt: "2024-01-15T10:00:00Z" }).html()).not.toContain(
             "fivetran-footer",
@@ -43,17 +61,17 @@ describe("AssetFreshnessFooter", () => {
     });
 });
 
-describe("formatAgo", () => {
+describe("ageOf", () => {
     test("rounds down to the largest unit", () => {
-        expect(formatAgo("2024-01-15T11:59:40Z", NOW)).toBe("just now");
-        expect(formatAgo("2024-01-15T11:15:00Z", NOW)).toBe("45 min ago");
-        expect(formatAgo("2024-01-14T12:00:00Z", NOW)).toBe("24 h ago");
-        expect(formatAgo("2024-01-10T12:00:00Z", NOW)).toBe("5 d ago");
+        expect(ageOf("2024-01-15T11:59:40Z", NOW)).toEqual({ unit: "now", count: 0 });
+        expect(ageOf("2024-01-15T11:15:00Z", NOW)).toEqual({ unit: "minute", count: 45 });
+        expect(ageOf("2024-01-14T12:00:00Z", NOW)).toEqual({ unit: "hour", count: 24 });
+        expect(ageOf("2024-01-10T12:00:00Z", NOW)).toEqual({ unit: "day", count: 5 });
     });
 
-    test("a missing, unreadable or future date is a placeholder", () => {
-        expect(formatAgo(undefined, NOW)).toBe("—");
-        expect(formatAgo("nope", NOW)).toBe("—");
-        expect(formatAgo("2024-01-16T12:00:00Z", NOW)).toBe("—");
+    test("a missing, unreadable or future date is null", () => {
+        expect(ageOf(undefined, NOW)).toBeNull();
+        expect(ageOf("nope", NOW)).toBeNull();
+        expect(ageOf("2024-01-16T12:00:00Z", NOW)).toBeNull();
     });
 });

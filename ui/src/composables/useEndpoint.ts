@@ -8,6 +8,7 @@ export type EndpointStatus =
     | "unsupported"
     | "noExecution"
     | "notRun"
+    | "running"
     | "error"
     | "loading"
     | "ready";
@@ -25,22 +26,28 @@ export function toQuery(params: EndpointParams): Record<string, string> {
     return query;
 }
 
+type TaskRunState = Pick<
+    ReturnType<typeof useConnectorData>,
+    "taskRun" | "hasExecution" | "isTerminal"
+>;
+
 // Calls one of this plugin's endpoints for the task's current run. The call goes to Kestra, never to Fivetran.
 // fetchEndpoint is optional because hosts before 2.1 don't provide it, and failures are best-effort.
+// The task run state comes from the caller's own useConnectorData, so the outputs are not fetched twice.
 export function useEndpoint<T>(
     props: SlotProps,
     name: string,
+    { taskRun, hasExecution, isTerminal }: TaskRunState,
     params: () => EndpointParams = () => ({}),
 ) {
     const data = shallowRef<T | null>(null);
     const loading = ref(false);
     const failed = ref(false);
+    // A response (possibly empty) arrived and no later request failed: rows may be shown, or an empty note.
+    const settled = ref(false);
     let requestId = 0;
 
     const supported = computed(() => typeof props.fetchEndpoint === "function");
-    const { taskRun, taskRunState, hasExecution, isTerminal } = useConnectorData(
-        props as KnownSlotProps["topology-details"],
-    );
     const taskRunId = computed(() => taskRun.value?.id as string | undefined);
 
     async function load() {
@@ -52,19 +59,27 @@ export function useEndpoint<T>(
             const response = await props.fetchEndpoint?.(name, toQuery(params()), {
                 taskRunId: taskRunId.value,
             });
-            if (current === requestId) data.value = (response ?? null) as T | null;
+            if (current === requestId) {
+                data.value = (response ?? null) as T | null;
+                settled.value = true;
+            }
         } catch {
-            if (current === requestId) failed.value = true;
+            if (current === requestId) {
+                // Rows of a previous connector or filter must not stay next to the error.
+                data.value = null;
+                settled.value = false;
+                failed.value = true;
+            }
         } finally {
             if (current === requestId) loading.value = false;
         }
     }
 
-    // The breakdown file only exists once the task run ends: reload then, and whenever a filter changes.
+    // The breakdown file only exists once the task run ends: fetch then, and when a filter changes after that.
     watch(
-        [taskRunId, taskRunState, isTerminal, () => JSON.stringify(toQuery(params()))],
+        [taskRunId, isTerminal, () => JSON.stringify(toQuery(params()))],
         () => {
-            if (supported.value && taskRunId.value) load();
+            if (supported.value && taskRunId.value && isTerminal.value) load();
         },
         { immediate: true },
     );
@@ -74,8 +89,9 @@ export function useEndpoint<T>(
         if (!supported.value) return "unsupported";
         if (!hasExecution.value) return "noExecution";
         if (!taskRunId.value) return "notRun";
-        if (data.value) return "ready";
-        return failed.value ? "error" : "loading";
+        if (!isTerminal.value) return "running";
+        if (failed.value) return "error";
+        return settled.value ? "ready" : "loading";
     });
 
     return { data, loading, failed, status, taskRunId, reload: load };

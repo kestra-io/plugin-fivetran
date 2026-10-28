@@ -45,7 +45,9 @@ const exposes = Object.fromEntries(
                 slotName: "topology-task-modal",
                 path: "./src/components/ConnectorDetails.vue",
             },
-            // Both tasks emit the table and connector assets, so both ship the footer of their cards.
+            // Both tasks emit the table and connector assets, so both ship the footer of their cards. Safe: the host
+            // renders one footer per asset card, resolved by the task type that produced it (AssetNode.vue), and
+            // reserves the largest footerHeight once for the whole graph.
             {
                 slotName: "asset-card-footer",
                 path: "./src/components/AssetFreshnessFooter.vue",

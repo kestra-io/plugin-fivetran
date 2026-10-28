@@ -9,9 +9,9 @@ export const getSubtitle = connectorsSubtitle;
 import type { KnownSlotProps } from "@kestra-io/artifact-sdk";
 import { computed } from "vue";
 import { useI18n } from "vue-i18n";
-import { ElConfigProvider } from "element-plus";
 import { RUNNING_STATES } from "../composables/states";
 import { useConnectorData } from "../composables/useConnectorData";
+import ArtifactFrame from "./ArtifactFrame.vue";
 import ConnectorSections from "./ConnectorSections.vue";
 
 const { t } = useI18n({
@@ -40,23 +40,7 @@ const note = computed(() => {
 </script>
 
 <template>
-    <!-- The plugin bundles its own Element Plus, which does not see the host's "kel" namespace. -->
-    <ElConfigProvider namespace="kel">
-        <div class="fivetran-artifact">
-            <p v-if="note" class="fivetran-artifact__note">{{ note }}</p>
-            <ConnectorSections v-else :connectors="connectors" :is-status-output="isStatusOutput" />
-        </div>
-    </ElConfigProvider>
+    <ArtifactFrame :note="note">
+        <ConnectorSections :connectors="connectors" :is-status-output="isStatusOutput" />
+    </ArtifactFrame>
 </template>
-
-<style scoped>
-.fivetran-artifact {
-    padding: var(--ks-spacing-3);
-    font-size: var(--ks-font-size-xs);
-}
-
-.fivetran-artifact__note {
-    margin: 0;
-    color: var(--ks-text-secondary);
-}
-</style>

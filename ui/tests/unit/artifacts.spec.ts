@@ -1,10 +1,12 @@
 import { describe, expect, test, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createI18n } from "vue-i18n";
+import { KsInput } from "@kestra-io/design-system";
 import TablesArtifact from "../../src/components/TablesArtifact.vue";
 import ConnectorsArtifact from "../../src/components/ConnectorsArtifact.vue";
 import {
     execution,
+    runningExecution,
     statusOutputs,
     statusTask,
     syncTask,
@@ -185,5 +187,70 @@ describe("TablesArtifact state filter", () => {
         // An empty value made the select show its placeholder instead of the selected option.
         expect(wrapper.find(".fivetran-tables__state").text()).toContain("All tables");
         expect(fetchEndpoint.mock.calls[0][1]).not.toHaveProperty("enabled");
+    });
+});
+describe("TablesArtifact loading states", () => {
+    test("a null response is an empty result, not a view stuck on Loading", async () => {
+        const wrapper = mountTables({
+            task: syncTask,
+            execution,
+            fetchOutputs: async () => syncWaitedOutputs,
+            fetchEndpoint: async () => null,
+        });
+        await flushPromises();
+
+        expect(wrapper.text()).not.toContain("Loading");
+        expect(wrapper.text()).toContain("No tables");
+    });
+
+    test("a failed reload shows the error and drops the rows of the previous request", async () => {
+        const fetchEndpoint = vi
+            .fn()
+            .mockResolvedValueOnce(page([row()]))
+            .mockRejectedValue(new Error("boom"));
+        const wrapper = mountTables({
+            task: syncTask,
+            execution,
+            fetchOutputs: async () => syncWaitedOutputs,
+            fetchEndpoint,
+        });
+        await flushPromises();
+        expect(wrapper.text()).toContain("salesforce.account");
+
+        const search = wrapper.findComponent(KsInput);
+        search.vm.$emit("update:modelValue", "lead");
+        search.vm.$emit("change", "lead");
+        await flushPromises();
+
+        expect(wrapper.text()).toContain("Could not load this view.");
+        expect(wrapper.text()).not.toContain("salesforce.account");
+    });
+
+    test("fetches nothing while the task run is still running", async () => {
+        const fetchEndpoint = vi.fn(async () => page([row()]));
+        const wrapper = mountTables({
+            task: syncTask,
+            execution: runningExecution,
+            fetchOutputs: async () => ({}),
+            fetchEndpoint,
+        });
+        await flushPromises();
+
+        expect(fetchEndpoint).not.toHaveBeenCalled();
+        expect(wrapper.text()).toContain("Available when the task run ends");
+        expect(wrapper.text()).not.toContain("No tables");
+    });
+
+    test("reads the task run's outputs once per mount", async () => {
+        const fetchOutputs = vi.fn(async () => syncWaitedOutputs);
+        mountTables({
+            task: syncTask,
+            execution,
+            fetchOutputs,
+            fetchEndpoint: async () => page([row()]),
+        });
+        await flushPromises();
+
+        expect(fetchOutputs).toHaveBeenCalledTimes(1);
     });
 });

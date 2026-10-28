@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import type { KnownSlotProps } from "@kestra-io/artifact-sdk";
-import { computed } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { formatAgo, formatDateTime, formatState } from "../composables/format";
+import { MISSING, ageOf, formatDateTime, formatState } from "../composables/format";
 
 const { t } = useI18n({
     inheritLocale: true,
@@ -11,6 +11,10 @@ const { t } = useI18n({
         en: {
             synced: "Synced {ago}",
             title: "Last successful Fivetran sync: {date}",
+            justNow: "just now",
+            minutesAgo: "{count} min ago",
+            hoursAgo: "{count} h ago",
+            daysAgo: "{count} d ago",
         },
     },
 });
@@ -28,7 +32,26 @@ const syncState = computed(() => {
     const value = props.metadata?.syncState;
     return typeof value === "string" && value ? formatState(value) : undefined;
 });
-const ago = computed(() => formatAgo(lastSyncedAt.value));
+
+// The graph stays open for a long time: tick so "2 min ago" does not freeze.
+const REFRESH_MS = 60_000;
+const now = ref(Date.now());
+let timer: ReturnType<typeof setInterval> | undefined;
+onMounted(() => {
+    timer = setInterval(() => (now.value = Date.now()), REFRESH_MS);
+});
+onBeforeUnmount(() => clearInterval(timer));
+
+const AGO_KEYS = {
+    now: "justNow",
+    minute: "minutesAgo",
+    hour: "hoursAgo",
+    day: "daysAgo",
+} as const;
+const ago = computed(() => {
+    const age = ageOf(lastSyncedAt.value, now.value);
+    return age ? t(AGO_KEYS[age.unit], { count: age.count }) : MISSING;
+});
 </script>
 
 <template>

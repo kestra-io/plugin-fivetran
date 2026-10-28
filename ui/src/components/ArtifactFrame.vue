@@ -12,14 +12,19 @@ const { t } = useI18n({
             unsupported: "This Kestra version can't load this view yet. Upgrade Kestra to see it.",
             noExecution: "Run the flow to see this view.",
             notRun: "This task has not run in this execution.",
+            running: "Available when the task run ends.",
             error: "Could not load this view.",
             loading: "Loading…",
         },
     },
 });
 
-const props = defineProps<{ status: EndpointStatus }>();
-const message = computed(() => (props.status === "ready" ? undefined : t(props.status)));
+// `note` is a message the caller decided on, which replaces the one of the status.
+const props = defineProps<{ status?: EndpointStatus; note?: string }>();
+const message = computed(() => {
+    if (props.note) return props.note;
+    return !props.status || props.status === "ready" ? undefined : t(props.status);
+});
 </script>
 
 <template>

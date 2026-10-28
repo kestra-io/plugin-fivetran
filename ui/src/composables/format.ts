@@ -65,15 +65,21 @@ export function formatDateTime(value?: string | number | null): string {
     const date = new Date(typeof value === "number" && value < 1e11 ? value * 1000 : value);
     return Number.isNaN(date.getTime()) ? MISSING : date.toLocaleString();
 }
-// "2 h ago" from an ISO instant, relative to `now`; a future or unreadable date is a placeholder.
-export function formatAgo(value?: string | null, now: number = Date.now()): string {
-    if (!value) return MISSING;
+export interface Age {
+    unit: "now" | "minute" | "hour" | "day";
+    count: number;
+}
+
+// The age of an ISO instant, relative to `now`, rounded down to the largest unit; null for a future or unreadable
+// date. The words are the caller's, so they can be translated.
+export function ageOf(value?: string | null, now: number = Date.now()): Age | null {
+    if (!value) return null;
     const time = new Date(value).getTime();
-    if (Number.isNaN(time) || time > now + 60_000) return MISSING;
+    if (Number.isNaN(time) || time > now + 60_000) return null;
     const minutes = Math.floor((now - time) / 60_000);
-    if (minutes < 1) return "just now";
-    if (minutes < 60) return `${minutes} min ago`;
+    if (minutes < 1) return { unit: "now", count: 0 };
+    if (minutes < 60) return { unit: "minute", count: minutes };
     const hours = Math.floor(minutes / 60);
-    if (hours < 48) return `${hours} h ago`;
-    return `${Math.floor(hours / 24)} d ago`;
+    if (hours < 48) return { unit: "hour", count: hours };
+    return { unit: "day", count: Math.floor(hours / 24) };
 }

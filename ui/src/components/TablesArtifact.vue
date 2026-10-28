@@ -67,9 +67,8 @@ const { t } = useI18n({
 const props = defineProps<KnownSlotProps["execution-artifact"]>();
 
 // On Status, one breakdown per connector: the picker lists the ones that have one.
-const { isStatusOutput, connectors } = useConnectorData(
-    props as KnownSlotProps["topology-details"],
-);
+const connectorData = useConnectorData(props as KnownSlotProps["topology-details"]);
+const { isStatusOutput, connectors } = connectorData;
 const connectorOptions = computed(() =>
     isStatusOutput.value ? connectors.value.filter((connector) => connector.id) : [],
 );
@@ -84,7 +83,7 @@ const state = ref<"all" | "true" | "false">("all");
 const page = ref(1);
 const resetPage = () => (page.value = 1);
 
-const { data, status } = useEndpoint<TablesPage>(props, "tables", () => ({
+const { data, status } = useEndpoint<TablesPage>(props, "tables", connectorData, () => ({
     connectorId: isStatusOutput.value ? selectedConnector.value : undefined,
     q: query.value,
     enabled: state.value === "all" ? undefined : state.value,
