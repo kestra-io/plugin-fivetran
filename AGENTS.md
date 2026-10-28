@@ -30,6 +30,14 @@ Both tasks read `GET /v2/connectors/{id}/schemas` once per connector, on the fin
 
 `writeTableBreakdown` writes one Ion row per table to internal storage with the `FileSerde` `OutputStream` overloads. Rows hold only `schema`, `schemaInDestination`, `schemaEnabled`, `table`, `tableInDestination`, `enabled`, `syncMode` and `enabledPatchAllowed`. Never add `columns`, `row_filter`, `parent_table`, `enabled_patch_settings.reason`, connector `config` or destination data. Disabled schemas and tables are included with their flags. `tableCount` counts every row, `enabledTableCount` counts tables that are enabled in an enabled schema. `ConnectorFreshness` is the nested summary on `Sync.Output`; `Status.ConnectorState` carries the same fields flat. Alert messages are never output, only codes.
 
+### Plugin endpoint
+
+`io.kestra.plugin.fivetran.endpoints.Tables` is a `PluginEndpoint` named `tables`, served by core at `/api/v1/{tenant}/plugins/{cls}/endpoints/tables/{executionId}/{taskRunId}` and called by the UI through the slot `fetchEndpoint` prop. It pages through the rows of the task run's `tables` breakdown file (`page`/`size`, size capped at 500), filtered by `q` (source or destination schema/table name, ignoring case) and `enabled` (same rule as `enabledTableCount`). On `Status`, `connectorId` picks the connector, defaulting to the first one.
+
+- The file URI is read only from the task run's own outputs, never from a parameter, and only for Fivetran task runs (`Sync`: `connectorId` plus `freshness`; `Status`: a `connectors` entry with its `id`). Another task's files are never readable through it.
+- Rows are rebuilt from the breakdown allow-list, so a field that is not one of the 8 breakdown fields can never be returned, whatever the file holds.
+- A missing or unreadable file answers like an empty one. The endpoint never throws.
+
 ### Asset lineage
 
 `AbstractFivetranConnection.emitAssets` is the one helper both tasks call, because a connector on Fivetran's own schedule is never triggered through `Sync` and one driven from Kestra is often never read through `Status`. Either task alone leaves half the graph empty.
