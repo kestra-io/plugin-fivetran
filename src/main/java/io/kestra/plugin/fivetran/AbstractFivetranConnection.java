@@ -34,6 +34,7 @@ import io.kestra.core.http.client.configurations.HttpConfiguration;
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.assets.Asset;
 import io.kestra.core.models.assets.AssetIdentifier;
+import io.kestra.core.models.assets.AssetRelationRef;
 import io.kestra.core.models.assets.AssetsDeclaration;
 import io.kestra.core.models.assets.Custom;
 import io.kestra.core.models.assets.External;
@@ -513,9 +514,19 @@ public abstract class AbstractFivetranConnection extends Task {
             List<AssetEmit> emits;
             try {
                 emits = new ArrayList<>();
-                emits.add(new AssetEmit(List.of(), List.of(connectorAsset(connectorId, connector, syncState))));
+                var connectorAsset = connectorAsset(connectorId, connector, syncState);
+                // The connector asset goes first, so the parent its tables declare `partOf` already exists.
+                emits.add(new AssetEmit(List.of(), List.of(connectorAsset)));
                 emits.addAll(
-                    tableEmits(runContext, connectorId, connector, syncState, destinationByGroup, schemasByConnector.get(connectorId))
+                    tableEmits(
+                        runContext,
+                        connectorId,
+                        connector,
+                        syncState,
+                        connectorAsset.getId(),
+                        destinationByGroup,
+                        schemasByConnector.get(connectorId)
+                    )
                 );
             } catch (Exception e) {
                 failures.record(connectorId, "build the assets", e);
@@ -620,9 +631,8 @@ public abstract class AbstractFivetranConnection extends Task {
         metadata.put("system", ASSET_SYSTEM);
         metadata.put("connectorId", connectorId);
         metadata.put("schema", schema);
-        if (syncState != null) {
-            metadata.put("syncState", syncState);
-        }
+        putIfNotNull(metadata, "lastSyncedAt", connector.getSucceededAt() != null ? connector.getSucceededAt().toString() : null);
+        putIfNotNull(metadata, "syncState", syncState);
 
         return Custom.builder()
             .id(sanitizeAssetId(composeConnectorAssetId(connectorId, connector, schema)))
@@ -633,7 +643,8 @@ public abstract class AbstractFivetranConnection extends Task {
 
     /**
      * One emit per table the connector writes, id {@code database.schema.name}, with the source table as
-     * input. Returns empty rather than throwing when the database or the schema config is unavailable:
+     * input and the connector asset as {@code partOf}, so the dependencies graph groups a schema's tables. Returns empty rather than throwing when the database or the schema config is
+     * unavailable:
      * lineage is metadata about the run, never the run itself, so a lineage read failure must not fail a
      * sync that actually succeeded.
      */
@@ -642,6 +653,7 @@ public abstract class AbstractFivetranConnection extends Task {
         String connectorId,
         Connector connector,
         String syncState,
+        String connectorAssetId,
         Map<String, Destination> destinationByGroup,
         Map<String, ConnectorSchema> schemas) {
         Destination destination = resolveDestination(runContext, connector, destinationByGroup);
@@ -710,11 +722,12 @@ public abstract class AbstractFivetranConnection extends Task {
                 metadata.put("sourceTable", sourceTable);
                 putIfNotNull(metadata, "syncMode", table.getSyncMode());
 
-                var output = Custom.builder()
+                Asset output = Custom.builder()
                     .id(sanitizeAssetId(joinSegments(database, schemaName, tableName)))
                     .type(TABLE_ASSET_TYPE)
                     .metadata(metadata)
-                    .build();
+                    .build()
+                    .withPartOf(new AssetRelationRef(connectorAssetId, null, null));
                 emits.add(new AssetEmit(List.of(sourceInput(connectorId, source, sourceSchema, sourceTable)), List.<Asset> of(output)));
             }
         }

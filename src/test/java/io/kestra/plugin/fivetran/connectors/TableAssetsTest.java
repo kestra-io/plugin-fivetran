@@ -5,6 +5,7 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -100,6 +101,14 @@ class TableAssetsTest {
         assertThat(account.getMetadata().get("schema"), is("salesforce"));
         assertThat(account.getMetadata().get("name"), is("account"));
         assertThat(account.getMetadata().get("connectorId"), is(CONNECTOR_ID));
+
+        // Every table is part of the connector asset, so the dependencies graph groups them under it.
+        assertThat(assets.get(0).getPartOf(), is(nullValue()));
+        assertThat(assets.get(1).getPartOf().id(), is(GROUP_ID + "." + SCHEMA));
+        assertThat(assets.get(2).getPartOf().id(), is(GROUP_ID + "." + SCHEMA));
+        // The connector asset carries lastSyncedAt too, for the asset card footer.
+        assertThat(assets.get(0).getMetadata().get("lastSyncedAt"), is(account.getMetadata().get("lastSyncedAt")));
+        assertThat(assets.get(0).getMetadata().get("lastSyncedAt"), is(notNullValue()));
     }
 
     @Test
@@ -207,6 +216,14 @@ class TableAssetsTest {
                 GROUP_ID + ".other_schema",
                 "analytics.other_schema.lead"
             )
+        );
+        // Each table points at its own connector's asset, not at the first connector of the run.
+        var parents = emittedAssets().stream()
+            .filter(asset -> asset.getPartOf() != null)
+            .collect(Collectors.toMap(Asset::getId, asset -> asset.getPartOf().id()));
+        assertThat(
+            parents,
+            is(Map.of("analytics.salesforce.account", GROUP_ID + "." + SCHEMA, "analytics.other_schema.lead", GROUP_ID + ".other_schema"))
         );
     }
 
