@@ -30,6 +30,7 @@ import io.kestra.core.models.flows.State;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.runners.RunContext;
+import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.utils.Await;
 import io.kestra.plugin.fivetran.AbstractFivetranConnection;
 import io.kestra.plugin.fivetran.models.Connector;
@@ -136,7 +137,11 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
         )
     },
     metrics = {
-        @Metric(name = "reattached", type = Counter.TYPE, description = "Whether the task re-attached to an already in-progress sync (1) instead of triggering a new one (0).")
+        @Metric(name = "reattached", type = Counter.TYPE, description = "Whether the task re-attached to an already in-progress sync (1) instead of triggering a new one (0)."),
+        @Metric(
+            name = "resumed", type = Counter.TYPE,
+            description = "Whether the task resumed polling a sync this task run triggered before it was interrupted (1) instead of triggering a new one (0)."
+        )
     }
 )
 public class Sync extends AbstractFivetranConnection implements RunnableTask<Sync.Output> {
@@ -157,7 +162,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
 
     @Schema(
         title = "Wait for sync completion",
-        description = "When true (default), poll the connector until the sync finishes to capture status and logs. Set to false to return once the sync has been triggered, without waiting for it. `succeededAt` is then null, since the sync is still running on Fivetran. No assets are emitted in that case, since the sync has not finished. To record lineage after the sync, add a downstream `io.kestra.plugin.fivetran.connectors.Status` task with `assets.enableAuto`."
+        description = "When true (default), poll the connector until the sync finishes to capture status and logs. Set to false to return once the sync has been triggered, without waiting for it. `succeededAt` is then null, since the sync is still running on Fivetran. No assets are emitted in that case, since the sync has not finished. To record lineage after the sync, add a downstream `io.kestra.plugin.fivetran.connectors.Status` task with `assets.enableAuto`. If the task run is interrupted while waiting (the worker is lost, or `maxDuration` is reached and the task is retried), the next attempt resumes polling the sync it triggered instead of triggering another one."
     )
     @Builder.Default
     Property<Boolean> wait = Property.ofValue(true);
@@ -238,54 +243,79 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             logger.warn("`force` takes precedence over `reattach`: a new sync will be triggered even though re-attach was requested");
         }
 
-        var wasSyncing = isSyncing(previousConnector);
-        var staleSync = rReattach
-            && !rForce
-            && wasSyncing
-            && isStaleForReattach(previousConnector, rReattachMaxAge, ZonedDateTime.now());
-        var reattached = rReattach && !rForce && wasSyncing && !staleSync;
+        var rWait = runContext.render(this.wait).as(Boolean.class).orElseThrow();
+        // A sync this task run triggered before it was interrupted (worker lost, maxDuration hit): resume polling it
+        // instead of triggering a second one. With `wait: false` there is nothing to resume.
+        var resumed = rWait ? readCheckpoint(runContext) : Optional.<SyncCheckpoint> empty();
 
-        if (reattached) {
-            logger.info("Reattached to the sync already running on connector '{}' instead of triggering a new one", connectorId);
+        boolean reattached;
+        boolean queuedBehindRunning;
+        ZonedDateTime previousCompletedDate;
+        if (resumed.isPresent()) {
+            var checkpoint = resumed.get();
+            reattached = checkpoint.reattached();
+            queuedBehindRunning = checkpoint.queuedBehindRunning();
+            previousCompletedDate = checkpoint.baselineDate();
+            logger.info(
+                "Resuming the sync this task run {} on connector '{}' before it was interrupted, instead of triggering a new one",
+                reattached ? "re-attached to" : "triggered",
+                connectorId
+            );
         } else {
-            // A stale in-progress sync ignores a non-forced trigger on Fivetran's side, so force it here to
-            // cancel that stale sync and start a fresh one instead of adopting it.
-            HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
-                .uri(
-                    URI.create(
-                        rBaseUrl(runContext) + "/v2/connectors/" + encodePathSegment(connectorId) + "/sync"
+            var wasSyncing = isSyncing(previousConnector);
+            var staleSync = rReattach
+                && !rForce
+                && wasSyncing
+                && isStaleForReattach(previousConnector, rReattachMaxAge, ZonedDateTime.now());
+            reattached = rReattach && !rForce && wasSyncing && !staleSync;
+            queuedBehindRunning = wasSyncing && !reattached && !rForce && !staleSync;
+            previousCompletedDate = previousConnector.completedDate();
+
+            if (reattached) {
+                logger.info("Reattached to the sync already running on connector '{}' instead of triggering a new one", connectorId);
+            } else {
+                // A stale in-progress sync ignores a non-forced trigger on Fivetran's side, so force it here to
+                // cancel that stale sync and start a fresh one instead of adopting it.
+                HttpRequest.HttpRequestBuilder requestBuilder = HttpRequest.builder()
+                    .uri(
+                        URI.create(
+                            rBaseUrl(runContext) + "/v2/connectors/" + encodePathSegment(connectorId) + "/sync"
+                        )
                     )
-                )
-                .method("POST")
-                .body(
-                    HttpRequest.JsonRequestBody.builder()
-                        .content(Map.of("force", rForce || staleSync))
-                        .build()
-                );
+                    .method("POST")
+                    .body(
+                        HttpRequest.JsonRequestBody.builder()
+                            .content(Map.of("force", rForce || staleSync))
+                            .build()
+                    );
 
-            HttpResponse<SyncResponse> syncHttpResponse = this.request(runContext, requestBuilder, SyncResponse.class);
-            SyncResponse syncResponse = syncHttpResponse.getBody();
-            if (syncResponse == null) {
-                throw new IllegalStateException("Missing body on trigger");
-            }
-            // Paused between the status read and the trigger: Fivetran still answers 200 Success.
-            if (syncResponse.getMessage() != null && syncResponse.getMessage().toLowerCase(Locale.ROOT).contains("is paused")) {
-                throw pausedConnector(connectorId);
+                HttpResponse<SyncResponse> syncHttpResponse = this.request(runContext, requestBuilder, SyncResponse.class);
+                SyncResponse syncResponse = syncHttpResponse.getBody();
+                if (syncResponse == null) {
+                    throw new IllegalStateException("Missing body on trigger");
+                }
+                // Paused between the status read and the trigger: Fivetran still answers 200 Success.
+                if (syncResponse.getMessage() != null && syncResponse.getMessage().toLowerCase(Locale.ROOT).contains("is paused")) {
+                    throw pausedConnector(connectorId);
+                }
+
+                logger.info("Job status {} with response: {}", syncHttpResponse.getStatus(), syncResponse);
             }
 
-            logger.info("Job status {} with response: {}", syncHttpResponse.getStatus(), syncResponse);
+            if (rWait) {
+                writeCheckpoint(runContext, SyncCheckpoint.triggered(previousCompletedDate, queuedBehindRunning, reattached));
+            }
         }
 
         runContext.metric(Counter.of("reattached", reattached ? 1 : 0));
+        runContext.metric(Counter.of("resumed", resumed.isPresent() ? 1 : 0));
 
-        if (!runContext.render(this.wait).as(Boolean.class).orElseThrow()) {
+        if (!rWait) {
             var outputBuilder = Output.builder().connectorId(connectorId).reattached(reattached);
             return withBreakdown(runContext, connectorId, previousConnector, ConnectorFreshness.from(previousConnector, null), outputBuilder, false);
         }
 
-        ZonedDateTime previousCompletedDate = previousConnector.completedDate();
         Duration rMaxDuration = runContext.render(this.maxDuration).as(Duration.class).orElseThrow();
-        var queuedBehindRunning = wasSyncing && !reattached && !rForce && !staleSync;
         var completion = new CompletionWatch(connectorId, previousCompletedDate, queuedBehindRunning, COMPLETION_GRACE, Instant::now, logger);
         AtomicReference<Exception> lastTransientError = new AtomicReference<>();
         Connector finalConnector;
@@ -337,6 +367,9 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             }
         }
 
+        // The sync this task run was waiting on has ended, failed or not: a retry must trigger a new one.
+        writeCheckpoint(runContext, SyncCheckpoint.done());
+
         if (finalConnector.hasFailed()) {
             throw new Exception(
                 "Connector '" + connectorId + "' failed"
@@ -350,6 +383,67 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             .succeededAt(finalConnector.getSucceededAt())
             .reattached(reattached);
         return withBreakdown(runContext, connectorId, finalConnector, ConnectorFreshness.from(finalConnector, true), outputBuilder, true);
+    }
+
+    static final String CHECKPOINT_KEY = "fivetran.sync";
+
+    /**
+     * What a task run needs to resume polling the sync it started, saved once the sync is triggered and marked
+     * {@code done} once polling sees it end. Checkpoints are scoped to the task run, which keeps its id when a lost
+     * worker's task is resubmitted and across {@code retry} attempts.
+     *
+     * @param baseline the connector's completion date before the trigger, as ISO-8601, null if it never completed
+     */
+    record SyncCheckpoint(String state, String baseline, boolean queuedBehindRunning, boolean reattached) {
+
+        static final String TRIGGERED = "triggered";
+        static final String DONE = "done";
+
+        static SyncCheckpoint triggered(ZonedDateTime baseline, boolean queuedBehindRunning, boolean reattached) {
+            return new SyncCheckpoint(TRIGGERED, baseline != null ? baseline.toString() : null, queuedBehindRunning, reattached);
+        }
+
+        static SyncCheckpoint done() {
+            return new SyncCheckpoint(DONE, null, false, false);
+        }
+
+        ZonedDateTime baselineDate() {
+            return baseline != null ? ZonedDateTime.parse(baseline) : null;
+        }
+    }
+
+    /**
+     * The sync to resume, empty when this task run has none in flight. Checkpoints only make resuming possible, so
+     * a store that cannot be read, or a value that cannot be parsed, is logged and the task triggers a sync as usual.
+     */
+    static Optional<SyncCheckpoint> readCheckpoint(RunContext runContext) {
+        try {
+            var checkpoints = runContext.checkpoints();
+            if (checkpoints == null) {
+                return Optional.empty();
+            }
+            var value = checkpoints.get(CHECKPOINT_KEY);
+            if (value.isEmpty()) {
+                return Optional.empty();
+            }
+            var checkpoint = JacksonMapper.ofJson().readValue(value.get(), SyncCheckpoint.class);
+            return SyncCheckpoint.TRIGGERED.equals(checkpoint.state()) ? Optional.of(checkpoint) : Optional.empty();
+        } catch (Exception e) {
+            runContext.logger().warn("Could not read the sync checkpoint, a new sync is triggered: {}", e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    // Never fails the task: a missing checkpoint only means a resubmitted task triggers a new sync, as before.
+    static void writeCheckpoint(RunContext runContext, SyncCheckpoint checkpoint) {
+        try {
+            var checkpoints = runContext.checkpoints();
+            if (checkpoints != null) {
+                checkpoints.set(CHECKPOINT_KEY, JacksonMapper.ofJson().writeValueAsString(checkpoint));
+            }
+        } catch (Exception e) {
+            runContext.logger().warn("Could not save the sync checkpoint, an interrupted run will trigger a new sync: {}", e.getMessage());
+        }
     }
 
     // The schema config is read once and shared by lineage and the table breakdown.
