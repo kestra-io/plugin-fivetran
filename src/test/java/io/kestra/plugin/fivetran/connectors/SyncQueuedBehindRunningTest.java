@@ -75,7 +75,7 @@ class SyncQueuedBehindRunningTest {
     }
 
     @Test
-    @DisplayName("Should return on the first completion even if the next sync is already running, for a plain trigger")
+    @DisplayName("Should return the completion when the next sync keeps the connector syncing, for a plain trigger")
     void returnsOnFirstCompletionWhenNotQueued(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         stubGet(Scenario.STARTED, "TRIGGER", T0, "scheduled");
         stubFor(
@@ -90,25 +90,26 @@ class SyncQueuedBehindRunningTest {
         );
         stubGet("DONE", "DONE", T1, "syncing");
 
-        var output = run(wmRuntimeInfo, false);
+        // Fivetran never leaves syncing here, so the completion is returned when maxDuration runs out.
+        var output = run(wmRuntimeInfo, false, Duration.ofSeconds(1));
 
         assertEquals(ZonedDateTime.parse(T1).toInstant(), output.getSucceededAt().toInstant());
     }
 
     @Test
-    @DisplayName("Should return on the first completion even if the next sync is already running, after a reattach")
+    @DisplayName("Should return the completion when the next sync keeps the connector syncing, after a reattach")
     void returnsOnFirstCompletionWhenReattached(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         stubGet(Scenario.STARTED, "DONE", T0, "syncing");
         stubGet("DONE", "DONE", T1, "syncing");
 
-        var output = run(wmRuntimeInfo, true);
+        var output = run(wmRuntimeInfo, true, Duration.ofSeconds(1));
 
         assertEquals(ZonedDateTime.parse(T1).toInstant(), output.getSucceededAt().toInstant());
         assertTrue(output.isReattached());
     }
 
     @Test
-    @DisplayName("Should accept a later completion seen while still syncing once the queued trigger's first completion was recorded")
+    @DisplayName("Should return a later completion seen while still syncing once the queued trigger's first completion was recorded")
     void acceptsSecondCompletionWhileStillSyncingWhenQueued(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         stubGet(Scenario.STARTED, "TRIGGER", T0, "syncing");
         stubFor(
@@ -124,12 +125,41 @@ class SyncQueuedBehindRunningTest {
         stubGet("FIRST", "SECOND", T1, "syncing");
         stubGet("SECOND", "SECOND", T2, "syncing");
 
-        var output = run(wmRuntimeInfo, false);
+        var output = run(wmRuntimeInfo, false, Duration.ofSeconds(1));
 
         assertEquals(ZonedDateTime.parse(T2).toInstant(), output.getSucceededAt().toInstant());
     }
 
+    @Test
+    @DisplayName("Should wait for syncing to end when Fivetran reports a completion and keeps syncing")
+    void waitsForSyncingToEndAfterACompletion(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubGet(Scenario.STARTED, "TRIGGER", T0, "scheduled");
+        stubFor(
+            post(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync"))
+                .inScenario(SCENARIO)
+                .whenScenarioStateIs("TRIGGER")
+                .willSetStateTo("PARTIAL")
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(SyncTestFixtures.SYNC_TRIGGERED_BODY)
+                )
+        );
+        // Seen on a real Fivetran connector: a first completion while still syncing, the final one about 11 s later.
+        stubGet("PARTIAL", "PARTIAL_AGAIN", T1, "syncing");
+        stubGet("PARTIAL_AGAIN", "FINAL", T1, "syncing");
+        stubGet("FINAL", "FINAL", T2, "scheduled");
+
+        var output = run(wmRuntimeInfo, false);
+
+        assertEquals(ZonedDateTime.parse(T2).toInstant(), output.getSucceededAt().toInstant());
+        assertEquals("scheduled", output.getFreshness().getSyncState());
+    }
+
     private Sync.Output run(WireMockRuntimeInfo wmRuntimeInfo, boolean reattach) throws Exception {
+        return run(wmRuntimeInfo, reattach, Duration.ofSeconds(10));
+    }
+
+    private Sync.Output run(WireMockRuntimeInfo wmRuntimeInfo, boolean reattach, Duration maxDuration) throws Exception {
         return Sync.builder()
             .id("sync_" + IdUtils.create())
             .type(Sync.class.getName())
@@ -139,7 +169,7 @@ class SyncQueuedBehindRunningTest {
             .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
             .reattach(Property.ofValue(reattach))
             .pollFrequency(Property.ofValue(Duration.ofMillis(100)))
-            .maxDuration(Property.ofValue(Duration.ofSeconds(10)))
+            .maxDuration(Property.ofValue(maxDuration))
             .build()
             .run(runContextFactory.of(ImmutableMap.of()));
     }

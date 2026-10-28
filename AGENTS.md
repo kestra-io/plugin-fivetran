@@ -21,7 +21,7 @@ Single-module plugin. Source packages under `io.kestra.plugin`:
 
 ### Key Plugin Classes
 
-- `io.kestra.plugin.fivetran.connectors.Sync`: triggers a connector sync and optionally waits for completion. Returns the connector id, the `succeededAt` of the sync it observed when it waited, a `freshness` summary and the table breakdown. Emits lineage when `assets.enableAuto` is set and `wait` is true.
+- `io.kestra.plugin.fivetran.connectors.Sync`: triggers a connector sync and optionally waits for completion. Fails right away on a paused connector (Fivetran answers the trigger with 200 Success and starts nothing). A completion seen while Fivetran still reports `syncing` waits up to 1 minute (`CompletionWatch`) for the syncing state to end, then is accepted anyway so back-to-back syncs never hang the task; at `maxDuration` that completion is returned rather than failing. Returns the connector id, the `succeededAt` of the sync it observed when it waited, a `freshness` summary and the table breakdown. Emits lineage when `assets.enableAuto` is set and `wait` is true.
 - `io.kestra.plugin.fivetran.connectors.Status`: reads the current status of one or more connectors via a single GET per connector, without triggering a sync. Computes a `fresh` verdict per connector from `succeededAt`/`syncFrequency`/`freshnessBuffer`, and by default (`wait: true`) polls until every connector is fresh or fails fast on a paused/broken connector, up to `maxDuration`. Also reports `updateState`, `alertCount`, `alertCodes` and the table breakdown per connector. Emits lineage when `assets.enableAuto` is set.
 
 ### Schema read and table breakdown
