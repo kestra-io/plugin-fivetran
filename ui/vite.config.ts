@@ -4,13 +4,28 @@ import { mergeConfig } from "vite";
 // Node base (56) + ~31.5px per row: 3/4 settings rows before a run, 5 rows with an execution.
 const HEIGHT_WITH_EXECUTION = 214;
 const TASKS = [
-    { type: "connectors.Sync", height: 150 },
-    { type: "connectors.Status", height: 182 },
+    { type: "connectors.Sync", height: 150, artifacts: ["tables"] },
+    { type: "connectors.Status", height: 182, artifacts: ["connectors", "tables"] },
 ];
+
+// One entry per view in the execution Artifacts tab. "tables" reads the plugin's `tables` endpoint, "connectors"
+// only the task run's outputs.
+const ARTIFACTS: Record<string, { path: string; title: string; description: string }> = {
+    connectors: {
+        path: "./src/components/ConnectorsArtifact.vue",
+        title: "Connectors",
+        description: "State, freshness, alerts and table counts of every connector.",
+    },
+    tables: {
+        path: "./src/components/TablesArtifact.vue",
+        title: "Tables",
+        description: "The schemas and tables the connector writes to the destination.",
+    },
+};
 
 // A customAction with no property to show makes the host open a dialog rendering the topology-task-modal slot.
 const exposes = Object.fromEntries(
-    TASKS.map(({ type, height }) => [
+    TASKS.map(({ type, height, artifacts }) => [
         type,
         [
             {
@@ -26,6 +41,14 @@ const exposes = Object.fromEntries(
                 slotName: "topology-task-modal",
                 path: "./src/components/ConnectorDetails.vue",
             },
+            ...artifacts.map((id) => ({
+                slotName: `execution-artifact/${id}`,
+                path: ARTIFACTS[id].path,
+                additionalProperties: {
+                    title: ARTIFACTS[id].title,
+                    description: ARTIFACTS[id].description,
+                },
+            })),
         ],
     ]),
 );
