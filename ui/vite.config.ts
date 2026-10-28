@@ -23,6 +23,10 @@ const ARTIFACTS: Record<string, { path: string; title: string; description: stri
     },
 };
 
+// One line under each asset card in the dependencies graph. The graph reserves it on every card, so it is kept to a
+// single line of extra-small text.
+const ASSET_FOOTER_HEIGHT = 20;
+
 // A customAction with no property to show makes the host open a dialog rendering the topology-task-modal slot.
 const exposes = Object.fromEntries(
     TASKS.map(({ type, height, artifacts }) => [
@@ -40,6 +44,12 @@ const exposes = Object.fromEntries(
             {
                 slotName: "topology-task-modal",
                 path: "./src/components/ConnectorDetails.vue",
+            },
+            // Both tasks emit the table and connector assets, so both ship the footer of their cards.
+            {
+                slotName: "asset-card-footer",
+                path: "./src/components/AssetFreshnessFooter.vue",
+                additionalProperties: { footerHeight: ASSET_FOOTER_HEIGHT },
             },
             ...artifacts.map((id) => ({
                 slotName: `execution-artifact/${id}`,

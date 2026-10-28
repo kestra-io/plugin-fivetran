@@ -65,3 +65,15 @@ export function formatDateTime(value?: string | number | null): string {
     const date = new Date(typeof value === "number" && value < 1e11 ? value * 1000 : value);
     return Number.isNaN(date.getTime()) ? MISSING : date.toLocaleString();
 }
+// "2 h ago" from an ISO instant, relative to `now`; a future or unreadable date is a placeholder.
+export function formatAgo(value?: string | null, now: number = Date.now()): string {
+    if (!value) return MISSING;
+    const time = new Date(value).getTime();
+    if (Number.isNaN(time) || time > now + 60_000) return MISSING;
+    const minutes = Math.floor((now - time) / 60_000);
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 48) return `${hours} h ago`;
+    return `${Math.floor(hours / 24)} d ago`;
+}

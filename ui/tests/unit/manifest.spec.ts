@@ -30,3 +30,11 @@ describe("vite.config.ts exposes", () => {
         expect(config).not.toContain("topology-task-drawer");
     });
 });
+describe("asset card footer", () => {
+    const config = readFileSync(resolve(process.cwd(), "vite.config.ts"), "utf8");
+
+    test("ships one footer for both tasks, with its height", () => {
+        expect(config.match(/slotName: "asset-card-footer"/g)).toHaveLength(1);
+        expect(config).toContain("footerHeight: ASSET_FOOTER_HEIGHT");
+    });
+});
