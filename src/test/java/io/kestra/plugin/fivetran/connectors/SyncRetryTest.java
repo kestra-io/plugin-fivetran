@@ -19,8 +19,10 @@ import com.google.common.collect.ImmutableMap;
 
 import io.kestra.core.http.client.HttpClientRequestException;
 import io.kestra.core.http.client.HttpClientResponseException;
+import io.kestra.core.http.client.configurations.HttpConfiguration;
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.property.Property;
+import io.kestra.core.models.tasks.retrys.Exponential;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 
@@ -28,10 +30,12 @@ import jakarta.inject.Inject;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.aResponse;
 import static com.github.tomakehurst.wiremock.client.WireMock.exactly;
+import static com.github.tomakehurst.wiremock.client.WireMock.findAll;
 import static com.github.tomakehurst.wiremock.client.WireMock.get;
 import static com.github.tomakehurst.wiremock.client.WireMock.getRequestedFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.postRequestedFor;
+import static com.github.tomakehurst.wiremock.client.WireMock.resetAllRequests;
 import static com.github.tomakehurst.wiremock.client.WireMock.stubFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static com.github.tomakehurst.wiremock.client.WireMock.verify;
@@ -495,6 +499,38 @@ class SyncRetryTest {
             }
         }
         return false;
+    }
+
+    @Test
+    @DisplayName("Should ignore options.retry so core's HTTP retry does not multiply maxAttempts")
+    void optionsRetryDoesNotStackOnMaxAttempts(WireMockRuntimeInfo wmRuntimeInfo) {
+        stubFor(get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID)).willReturn(aResponse().withStatus(503)));
+
+        // The HTTP library below core retries a 503 once on its own, so compare with the same task without
+        // `options` instead of asserting an absolute count.
+        assertThrows(HttpClientResponseException.class, () -> retryTask(wmRuntimeInfo.getHttpBaseUrl(), null).run(runContext()));
+        int withoutOptions = findAll(getRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID))).size();
+        resetAllRequests();
+
+        var options = HttpConfiguration.builder()
+            .retry(Exponential.builder().interval(Duration.ofMillis(10)).maxInterval(Duration.ofMillis(50)).maxAttempts(5).build())
+            .build();
+        assertThrows(HttpClientResponseException.class, () -> retryTask(wmRuntimeInfo.getHttpBaseUrl(), options).run(runContext()));
+
+        // With core's retry left on, each of the 2 attempts would itself be retried 5 times.
+        verify(exactly(withoutOptions), getRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID)));
+    }
+
+    private static Sync retryTask(String baseUrl, HttpConfiguration options) {
+        return Sync.builder()
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .connectorId(Property.ofValue(CONNECTOR_ID))
+            .baseUrl(Property.ofValue(baseUrl))
+            .maxAttempts(Property.ofValue(2))
+            .initialRetryDelay(Property.ofValue(Duration.ofMillis(10)))
+            .options(options)
+            .build();
     }
 
     @Test

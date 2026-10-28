@@ -126,7 +126,7 @@ public abstract class AbstractFivetranConnection extends Task {
 
     @Schema(
         title = "HTTP client options",
-        description = "Optional Kestra HTTP configuration (timeouts, proxy) applied to Fivetran calls. Retries are configured separately via `maxAttempts` and `initialRetryDelay`."
+        description = "Optional Kestra HTTP configuration (timeouts, proxy) applied to Fivetran calls. Its `retry`, `retryOnStatusCodes`, `retryOnStatusCodesByMethod` and `retryableTransportFailureMethods` fields are ignored: retries are configured with `maxAttempts` and `initialRetryDelay`."
     )
     @PluginProperty(group = "advanced")
     protected HttpConfiguration options;
@@ -165,6 +165,9 @@ public abstract class AbstractFivetranConnection extends Task {
         HttpConfiguration.HttpConfigurationBuilder builder = this.options != null ? this.options.toBuilder() : HttpConfiguration.builder();
 
         builder.auth(BasicAuthConfiguration.builder().username(apiKey).password(apiSecret).build());
+        // Retries are owned by the loop below (maxAttempts/initialRetryDelay). Core's own HTTP retry is turned
+        // off so a user-set `options.retry` cannot run inside it and multiply the attempts.
+        builder.retry(Exponential.builder().interval(Duration.ofSeconds(1)).maxInterval(Duration.ofSeconds(30)).maxAttempts(1).build());
 
         HttpConfiguration httpConfiguration = builder.build();
 
