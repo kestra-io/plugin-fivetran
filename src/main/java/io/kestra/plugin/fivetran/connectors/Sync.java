@@ -5,6 +5,7 @@ import java.net.URI;
 import java.time.Duration;
 import java.time.ZonedDateTime;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeoutException;
@@ -51,6 +52,7 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
         Starts a Fivetran connector sync through the Fivetran API.
         Can force-cancel and restart an in-progress sync, or re-attach to one already in progress with `reattach`.
         Waits for completion by default (up to 60 minutes) and fails if the connector reports a failure.
+        Fails right away on a paused connector, since Fivetran accepts the sync request but starts nothing.
         With `assets.enableAuto` set and `wait: true`, emits one asset per table the connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph, and the source table as its input: a `Table` asset for database sources (e.g. PostgreSQL, MySQL, SQL Server, Snowflake, BigQuery) or an `External` asset `connectorId.schema.table` otherwise. With `wait: false` no asset is emitted, since the sync has not finished when the task returns.
         If building or emitting an asset fails, `assets.assetFailureBehavior` applies: `FAIL` fails the task, `WARN` (the default) ends it in WARNING, `IGNORE` only logs at debug level.
         Whatever `assets.enableAuto` is set to, reads the connector's schema config once (one extra GET) to output a per-table breakdown file (`tables`, `tableCount`, `enabledTableCount`) and a `freshness` summary with the connector's alert codes; a failed schema read logs a warning and never fails the task.
@@ -223,6 +225,9 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         }
 
         Connector previousConnector = fetchConnector(runContext);
+        if (Boolean.TRUE.equals(previousConnector.getPaused())) {
+            throw pausedConnector(connectorId);
+        }
 
         var rForce = runContext.render(this.force).as(Boolean.class).orElseThrow();
         var rReattach = runContext.render(this.reattach).as(Boolean.class).orElse(false);
@@ -259,6 +264,10 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             SyncResponse syncResponse = syncHttpResponse.getBody();
             if (syncResponse == null) {
                 throw new IllegalStateException("Missing body on trigger");
+            }
+            // Paused between the status read and the trigger: Fivetran still answers 200 Success.
+            if (syncResponse.getMessage() != null && syncResponse.getMessage().toLowerCase(Locale.ROOT).contains("is paused")) {
+                throw pausedConnector(connectorId);
             }
 
             logger.info("Job status {} with response: {}", syncHttpResponse.getStatus(), syncResponse);
@@ -403,6 +412,16 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         }
 
         return completedDate.isBefore(now.minus(maxAge));
+    }
+
+    /**
+     * Fivetran answers a sync request on a paused connector with 200 Success and "Connection with id '...' is
+     * paused", and starts nothing, so waiting on it could only end in a maxDuration timeout.
+     */
+    private static IllegalStateException pausedConnector(String connectorId) {
+        return new IllegalStateException(
+            "Connector '" + connectorId + "' is paused in Fivetran, which ignores sync requests on a paused connector. Resume it in Fivetran, then run the task again."
+        );
     }
 
     private Connector fetchConnector(RunContext runContext) throws IllegalVariableEvaluationException, HttpClientException {
