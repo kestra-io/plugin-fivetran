@@ -92,13 +92,13 @@ const { data, status } = useEndpoint<TablesPage>(props, "tables", connectorData,
 }));
 
 const rows = computed(() =>
-    (data.value?.results ?? []).map((row) => {
+    (data.value?.results ?? []).map((row, index) => {
         const source = [row.schema, row.table].filter(Boolean).join(".") || MISSING;
         const destination = [row.schemaInDestination, row.tableInDestination]
             .filter(Boolean)
             .join(".");
         return {
-            key: source,
+            key: `${row.schema ?? ""}|${row.table ?? ""}|${index}`,
             source,
             // Only shown when Fivetran renames it, otherwise it repeats the source name.
             destination: destination && destination !== source ? destination : "",

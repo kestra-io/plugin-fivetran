@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import type { KnownSlotProps } from "@kestra-io/artifact-sdk";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { MISSING, ageOf, formatDateTime, formatState } from "../composables/format";
+import { useSharedClock } from "../composables/useSharedClock";
 
 const { t } = useI18n({
     inheritLocale: true,
@@ -33,14 +34,7 @@ const syncState = computed(() => {
     return typeof value === "string" && value ? formatState(value) : undefined;
 });
 
-// The graph stays open for a long time: tick so "2 min ago" does not freeze.
-const REFRESH_MS = 60_000;
-const now = ref(Date.now());
-let timer: ReturnType<typeof setInterval> | undefined;
-onMounted(() => {
-    timer = setInterval(() => (now.value = Date.now()), REFRESH_MS);
-});
-onBeforeUnmount(() => clearInterval(timer));
+const { now } = useSharedClock();
 
 const AGO_KEYS = {
     now: "justNow",

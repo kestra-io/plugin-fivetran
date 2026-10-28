@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { mount } from "@vue/test-utils";
+import { mount, type VueWrapper } from "@vue/test-utils";
 import { createI18n } from "vue-i18n";
 import AssetFreshnessFooter from "../../src/components/AssetFreshnessFooter.vue";
 import { ageOf } from "../../src/composables/format";
 
 const NOW = new Date("2024-01-15T12:00:00Z").getTime();
 
-const footer = (metadata: Record<string, unknown>) =>
-    mount(AssetFreshnessFooter, {
+const mounted: VueWrapper[] = [];
+const footer = (metadata: Record<string, unknown>) => {
+    const wrapper = mount(AssetFreshnessFooter, {
         props: {
             assetId: "analytics.salesforce.account",
             assetType: "io.kestra.plugin.ee.assets.Table",
@@ -15,13 +16,20 @@ const footer = (metadata: Record<string, unknown>) =>
         },
         global: { plugins: [createI18n({ legacy: false, locale: "en", messages: { en: {} } })] },
     });
+    mounted.push(wrapper);
+    return wrapper;
+};
 
 describe("AssetFreshnessFooter", () => {
     beforeEach(() => {
         vi.useFakeTimers();
         vi.setSystemTime(NOW);
     });
-    afterEach(() => vi.useRealTimers());
+    afterEach(() => {
+        // The clock is shared across mounts, so a footer left mounted would leak its interval into the next test.
+        mounted.splice(0).forEach((wrapper) => wrapper.unmount());
+        vi.useRealTimers();
+    });
 
     test("shows the age of the last Fivetran sync and the sync state", () => {
         const wrapper = footer({
@@ -49,6 +57,18 @@ describe("AssetFreshnessFooter", () => {
 
         wrapper.unmount();
 
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    test("shares one clock between footers and stops it with the last one", () => {
+        const first = footer({ connectorId: "conn_a", lastSyncedAt: "2024-01-15T11:59:30Z" });
+        const second = footer({ connectorId: "conn_b", lastSyncedAt: "2024-01-15T11:59:30Z" });
+        expect(vi.getTimerCount()).toBe(1);
+
+        first.unmount();
+        expect(vi.getTimerCount()).toBe(1);
+
+        second.unmount();
         expect(vi.getTimerCount()).toBe(0);
     });
 

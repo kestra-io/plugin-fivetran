@@ -1,4 +1,5 @@
 import { formatNumber } from "./format";
+import { translate } from "./messages";
 import { latestTaskRun } from "./useConnectorData";
 
 export interface ArtifactContext {
@@ -6,9 +7,6 @@ export interface ArtifactContext {
     execution?: unknown;
     fetchOutputs?: (query?: { taskRunId?: string }) => Promise<Record<string, any>>;
 }
-
-const plural = (count: number, one: string, many: string) =>
-    `${formatNumber(count)} ${count === 1 ? one : many}`;
 
 // The Artifacts tab calls getSubtitle with the host props: any failure just leaves the line empty.
 async function outputsOf({ task, execution, fetchOutputs }: ArtifactContext) {
@@ -47,7 +45,11 @@ export async function tablesSubtitle(context: ArtifactContext): Promise<string |
     const outputs = await outputsOf(context);
     const counts = outputs && tableCounts(outputs);
     if (!counts) return undefined;
-    return `${formatNumber(counts.enabled)} of ${plural(counts.total, "table", "tables")} enabled`;
+    return translate(
+        "tablesEnabled",
+        { enabled: formatNumber(counts.enabled), count: formatNumber(counts.total) },
+        counts.total,
+    );
 }
 
 export async function connectorsSubtitle(context: ArtifactContext): Promise<string | undefined> {
@@ -55,6 +57,6 @@ export async function connectorsSubtitle(context: ArtifactContext): Promise<stri
     if (!connectors || typeof connectors !== "object") return undefined;
     const states = Object.values(connectors as Record<string, any>);
     const stale = states.filter((state) => state?.fresh === false).length;
-    const line = plural(states.length, "connector", "connectors");
-    return stale ? `${line} · ${formatNumber(stale)} not fresh` : line;
+    const line = translate("connectors", { count: formatNumber(states.length) }, states.length);
+    return stale ? `${line} · ${translate("notFresh", { count: formatNumber(stale) })}` : line;
 }
