@@ -162,6 +162,35 @@ class TablesTest {
     }
 
     @Test
+    void ignores_a_tables_output_pointing_at_another_task_runs_folder() throws Exception {
+        var foreign = "kestra:///ns/flow/executions/exec/tasks/sync/othertaskrun/tables.ion";
+        var context = syncContext().output("tables", foreign).file(foreign, breakdown());
+
+        var json = StubEndpointContext.json(new Tables().handle(context));
+
+        assertThat(json.get("total").asLong(), is(0L));
+        assertThat(json.get("results").size(), is(0));
+    }
+
+    @Test
+    void ignores_a_path_that_escapes_the_task_run_folder() throws Exception {
+        var escaping = "kestra:///ns/flow/executions/exec/tasks/sync/taskrun/../othertaskrun/tables.ion";
+        var context = syncContext().output("tables", escaping).file(escaping, breakdown());
+
+        assertThat(StubEndpointContext.json(new Tables().handle(context)).get("total").asLong(), is(0L));
+    }
+
+    @Test
+    void a_failing_outputs_fetch_answers_like_an_empty_one() throws Exception {
+        var context = syncContext().failingOutputs();
+
+        var json = StubEndpointContext.json(new Tables().handle(context));
+
+        assertThat(json.get("total").asLong(), is(0L));
+        assertThat(json.get("results").size(), is(0));
+    }
+
+    @Test
     void missing_output_file_or_unreadable_file_returns_no_rows() throws Exception {
         var noFile = new StubEndpointContext().output("connectorId", "connector_a").output("freshness", Map.of()).output("tables", SYNC_URI);
         // A failed schema read leaves `tables` null.

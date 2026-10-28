@@ -162,7 +162,20 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
 
     @Schema(
         title = "Wait for sync completion",
-        description = "When true (default), poll the connector until the sync finishes to capture status and logs. Set to false to return once the sync has been triggered, without waiting for it. `succeededAt` is then null, since the sync is still running on Fivetran. No assets are emitted in that case, since the sync has not finished. To record lineage after the sync, add a downstream `io.kestra.plugin.fivetran.connectors.Status` task with `assets.enableAuto`. If the task run is interrupted while waiting (the worker is lost, or `maxDuration` is reached and the task is retried), the next attempt resumes polling the sync it triggered instead of triggering another one. Only a sync triggered less than twice `maxDuration` ago is resumed: a restart of the execution long after triggers a new sync. A paused connector fails right away, unless the resumed sync already completed."
+        description = """
+            When true (default), poll the connector until the sync finishes to capture status and logs. Set to false \
+            to return once the sync has been triggered, without waiting for it. `succeededAt` is then null, since the \
+            sync is still running on Fivetran. No assets are emitted in that case, since the sync has not finished. \
+            To record lineage after the sync, add a downstream `io.kestra.plugin.fivetran.connectors.Status` task with \
+            `assets.enableAuto`.
+
+            If the task run is interrupted while waiting (the worker is lost, or `maxDuration` is reached and the \
+            task is retried), the next attempt of the same task run resumes polling the sync it triggered instead of \
+            triggering another one. This applies to `RETRY_FAILED_TASK` retries and to worker resubmission, not to \
+            `CREATE_NEW_EXECUTION` retries, which start a new task run with no saved state and trigger a new sync. \
+            A sync is resumed only when the last attempt that touched it (its trigger, the start of a resumed \
+            attempt, or a timeout) is less than twice `maxDuration` old: a restart of the execution long after \
+            triggers a new sync. A paused connector fails right away, unless the resumed sync already completed."""
     )
     @Builder.Default
     Property<Boolean> wait = Property.ofValue(true);
@@ -241,7 +254,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         }
 
         var rWait = runContext.render(this.wait).as(Boolean.class).orElseThrow();
-        Duration rMaxDuration = runContext.render(this.maxDuration).as(Duration.class).orElseThrow();
+        var rMaxDuration = runContext.render(this.maxDuration).as(Duration.class).orElseThrow();
         // A sync this task run triggered before it was interrupted (worker lost, maxDuration hit): resume polling it
         // instead of triggering a second one. With `wait: false` there is nothing to resume.
         var resumed = rWait ? readCheckpoint(runContext, rMaxDuration, Instant.now()) : Optional.<SyncCheckpoint> empty();
@@ -254,8 +267,11 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         boolean reattached;
         boolean queuedBehindRunning;
         ZonedDateTime previousCompletedDate;
+        SyncCheckpoint inFlight = null;
         if (resumed.isPresent()) {
-            var checkpoint = resumed.get();
+            var checkpoint = resumed.get().withAttempt(Instant.now());
+            inFlight = checkpoint;
+            writeCheckpoint(runContext, checkpoint);
             reattached = checkpoint.reattached();
             queuedBehindRunning = checkpoint.queuedBehindRunning();
             previousCompletedDate = checkpoint.baselineDate();
@@ -306,7 +322,8 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             }
 
             if (rWait) {
-                writeCheckpoint(runContext, SyncCheckpoint.triggered(previousCompletedDate, queuedBehindRunning, reattached, Instant.now()));
+                inFlight = SyncCheckpoint.triggered(previousCompletedDate, queuedBehindRunning, reattached, Instant.now());
+                writeCheckpoint(runContext, inFlight);
             }
         }
 
@@ -363,6 +380,10 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             } else {
                 // If polling only ever saw transient errors, name the last one so the failure is diagnosable
                 // instead of surfacing Await's generic "failed to terminate" message with no cause.
+                // The next attempt's window starts when this one ends, so a retry interval longer than maxDuration still resumes.
+                if (inFlight != null) {
+                    writeCheckpoint(runContext, inFlight.withAttempt(Instant.now()));
+                }
                 Exception last = lastTransientError.get();
                 if (last == null) {
                     throw e;
@@ -401,18 +422,19 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
      *
      * @param baseline the connector's completion date before the trigger, as ISO-8601, null if it never completed
      * @param triggeredAt when the sync was triggered, as ISO-8601; null on checkpoints saved before it was recorded
+     * @param lastAttemptAt when an attempt last started or timed out on this sync, as ISO-8601; null before the first resume
      */
-    record SyncCheckpoint(String state, String baseline, boolean queuedBehindRunning, boolean reattached, String triggeredAt) {
+    record SyncCheckpoint(String state, String baseline, boolean queuedBehindRunning, boolean reattached, String triggeredAt, String lastAttemptAt) {
 
         static final String TRIGGERED = "triggered";
         static final String DONE = "done";
 
         static SyncCheckpoint triggered(ZonedDateTime baseline, boolean queuedBehindRunning, boolean reattached, Instant triggeredAt) {
-            return new SyncCheckpoint(TRIGGERED, baseline != null ? baseline.toString() : null, queuedBehindRunning, reattached, triggeredAt.toString());
+            return new SyncCheckpoint(TRIGGERED, baseline != null ? baseline.toString() : null, queuedBehindRunning, reattached, triggeredAt.toString(), triggeredAt.toString());
         }
 
         static SyncCheckpoint done() {
-            return new SyncCheckpoint(DONE, null, false, false, null);
+            return new SyncCheckpoint(DONE, null, false, false, null, null);
         }
 
         ZonedDateTime baselineDate() {
@@ -422,14 +444,27 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         Instant triggeredInstant() {
             return triggeredAt != null ? Instant.parse(triggeredAt) : null;
         }
+
+        SyncCheckpoint withAttempt(Instant attemptAt) {
+            return new SyncCheckpoint(state, baseline, queuedBehindRunning, reattached, triggeredAt, attemptAt.toString());
+        }
+
+        Instant lastActivity() {
+            var triggered = triggeredInstant();
+            var attempt = lastAttemptAt != null ? Instant.parse(lastAttemptAt) : null;
+            if (triggered == null || attempt == null) {
+                return triggered;
+            }
+            return attempt.isAfter(triggered) ? attempt : triggered;
+        }
     }
 
     /**
      * The sync to resume, empty when this task run has none in flight. Checkpoints only make resuming possible, so
      * a store that cannot be read, or a value that cannot be parsed, is logged and the task triggers a sync as usual.
-     * A checkpoint older than twice {@code maxDuration} (or with no trigger time) is stale: a {@code retry} right
-     * after a timeout is well within that and keeps waiting on the running sync, whereas a restart long after must
-     * not judge an unrelated later sync against an old baseline.
+     * A checkpoint whose last activity (trigger, attempt start or attempt timeout) is older than twice
+     * {@code maxDuration}, or with no trigger time, is stale: a {@code retry} after a timeout is within that however
+     * many attempts came before, whereas a restart long after must not judge an unrelated later sync against an old baseline.
      */
     static Optional<SyncCheckpoint> readCheckpoint(RunContext runContext, Duration maxDuration, Instant now) {
         try {
@@ -446,16 +481,16 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
                 return Optional.empty();
             }
 
-            var triggeredAt = checkpoint.triggeredInstant();
-            if (triggeredAt == null) {
+            if (checkpoint.triggeredInstant() == null) {
                 runContext.logger().warn("The saved sync checkpoint has no trigger time, so it is ignored and a new sync is triggered");
                 return Optional.empty();
             }
+            var lastActivity = checkpoint.lastActivity();
             var maxAge = maxDuration.multipliedBy(2);
-            if (triggeredAt.isBefore(now.minus(maxAge))) {
+            if (lastActivity.isBefore(now.minus(maxAge))) {
                 runContext.logger().warn(
-                    "The saved sync checkpoint was taken at {}, more than twice maxDuration ({}) ago, so it is ignored and a new sync is triggered",
-                    triggeredAt,
+                    "The saved sync checkpoint was last touched at {}, more than twice maxDuration ({}) ago, so it is ignored and a new sync is triggered",
+                    lastActivity,
                     maxDuration
                 );
                 return Optional.empty();

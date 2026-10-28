@@ -19,6 +19,7 @@ import io.kestra.core.models.property.Property;
 import io.kestra.core.runners.RunContext;
 import io.kestra.core.runners.RunContextFactory;
 import io.kestra.core.serializers.JacksonMapper;
+import io.kestra.core.utils.IdUtils;
 import io.kestra.core.utils.TestsUtils;
 
 import jakarta.inject.Inject;
@@ -68,6 +69,40 @@ class SyncCheckpointTest {
         assertNotNull(output.getSucceededAt());
         verify(exactly(1), postRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync")));
         assertEquals(Sync.SyncCheckpoint.DONE, checkpoint(runContext).state());
+    }
+
+    @Test
+    @DisplayName("Should keep resuming the same sync across consecutive timeouts, never triggering a second one")
+    void repeatedTimeoutsNeverTriggerASecondSync(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubTrigger();
+        stubConnector(connectorBody(CONNECTOR_ID, BEFORE, null, "syncing"));
+
+        Sync task = syncTask(wmRuntimeInfo, true);
+        RunContext runContext = runContext(task);
+        // Four attempts of 400ms each: the last starts well past twice maxDuration (800ms) after the trigger.
+        for (var attempt = 0; attempt < 4; attempt++) {
+            assertThrows(TimeoutException.class, () -> task.run(runContext));
+        }
+
+        verify(exactly(1), postRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync")));
+    }
+
+    @Test
+    @DisplayName("Should resume when the retry interval is longer than maxDuration")
+    void longRetryIntervalStillResumes(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubTrigger();
+        stubConnector(connectorBody(CONNECTOR_ID, BEFORE, null, "syncing"));
+
+        Sync task = syncTask(wmRuntimeInfo, true);
+        RunContext runContext = runContext(task);
+        assertThrows(TimeoutException.class, () -> task.run(runContext));
+
+        // 500ms pause (> 400ms maxDuration): 900ms since the trigger, but only 500ms since the attempt ended.
+        Thread.sleep(500);
+        stubConnector(connectorBody(CONNECTOR_ID, AFTER, null, "scheduled"));
+
+        assertNotNull(task.run(runContext).getSucceededAt());
+        verify(exactly(1), postRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync")));
     }
 
     @Test
@@ -232,7 +267,7 @@ class SyncCheckpointTest {
         stubConnector(pausedBody(BEFORE));
 
         Sync task = Sync.builder()
-            .id("sync")
+            .id("sync_" + IdUtils.create())
             .type(Sync.class.getName())
             .apiKey(Property.ofValue("dummy-api-key"))
             .apiSecret(Property.ofValue("dummy-api-secret"))
@@ -267,7 +302,7 @@ class SyncCheckpointTest {
 
     private static Sync syncTask(WireMockRuntimeInfo wmRuntimeInfo, boolean wait) {
         return Sync.builder()
-            .id("sync")
+            .id("sync_" + IdUtils.create())
             .type(Sync.class.getName())
             .apiKey(Property.ofValue("dummy-api-key"))
             .apiSecret(Property.ofValue("dummy-api-secret"))

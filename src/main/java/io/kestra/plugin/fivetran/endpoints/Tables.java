@@ -10,6 +10,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.plugins.endpoint.PluginEndpoint;
 import io.kestra.core.plugins.endpoint.PluginEndpointContext;
@@ -23,11 +26,13 @@ import io.kestra.core.serializers.FileSerde;
  * case, and {@code enabled} keeps the tables that are synced ({@code true}: enabled table in an enabled schema) or
  * not ({@code false}).
  * <p>
- * The file URI is always read from the task run's own outputs, never from a parameter, and only the breakdown's
- * allow-listed fields are returned, whatever the file holds.
+ * The file URI is always read from the task run's own outputs, never from a parameter, must sit in the task run's
+ * own storage folder, and only the breakdown's allow-listed fields are returned, whatever the file holds.
  */
 @Plugin
 public class Tables implements PluginEndpoint {
+    private static final Logger LOG = LoggerFactory.getLogger(Tables.class);
+
     static final int DEFAULT_SIZE = 50;
     static final int MAX_SIZE = 500;
 
@@ -90,7 +95,9 @@ public class Tables implements PluginEndpoint {
                     counts[1]++;
                 });
             } catch (IOException | RuntimeException e) {
-                // A file that cannot be read is answered like a missing one: the view shows no rows.
+                // A file that cannot be read is answered like a missing one: the view shows no rows. Only the exception
+                // class is logged, as its message could carry row content or storage details.
+                LOG.warn("Could not read the tables breakdown of task run {}: {}", context.taskRunId(), e.getClass().getSimpleName());
                 results.clear();
                 counts[0] = 0;
                 counts[1] = 0;
@@ -108,27 +115,31 @@ public class Tables implements PluginEndpoint {
 
     /**
      * Opens the breakdown file of the requested connector, empty when the task run is not a Fivetran one, the
-     * output is missing, or the file does not exist. The scoped storage rejects any URI outside the execution,
-     * which is treated the same as a missing file.
+     * output is missing, the file does not exist, or its URI is not under this task run's own storage folder. The
+     * scoped storage rejects any URI outside the execution, which is treated the same as a missing file.
      */
     static Optional<BreakdownFile> open(PluginEndpointContext context) {
-        var outputs = context.outputs().get();
-        if (outputs == null) {
-            return Optional.empty();
-        }
-
-        var located = locate(outputs, context.param("connectorId"));
-        if (located == null) {
-            return Optional.empty();
-        }
-
         try {
-            var uri = URI.create(located.uri());
+            var outputs = context.outputs().get();
+            if (outputs == null) {
+                return Optional.empty();
+            }
+
+            var located = locate(outputs, context.param("connectorId"));
+            if (located == null) {
+                return Optional.empty();
+            }
+
+            var uri = URI.create(located.uri()).normalize();
+            if (uri.getPath() == null || !uri.getPath().contains("/" + context.taskRunId() + "/")) {
+                return Optional.empty();
+            }
             if (!context.storage().exists(uri)) {
                 return Optional.empty();
             }
             return Optional.of(new BreakdownFile(context.storage().getFile(uri), located.tableCount()));
-        } catch (IllegalArgumentException | IOException e) {
+        } catch (IOException | RuntimeException e) {
+            LOG.warn("Could not open the tables breakdown of task run {}: {}", context.taskRunId(), e.getClass().getSimpleName());
             return Optional.empty();
         }
     }

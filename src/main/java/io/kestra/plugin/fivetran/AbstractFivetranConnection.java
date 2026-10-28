@@ -128,14 +128,21 @@ public abstract class AbstractFivetranConnection extends Task {
 
     @Schema(
         title = "HTTP client options",
-        description = "Optional Kestra HTTP configuration (timeouts, proxy) applied to Fivetran calls. Its `retry` policy, when set, replaces `maxAttempts` and `initialRetryDelay` as the plugin's retry policy; it is applied once by the plugin, never stacked with the HTTP client's own retry. Its `retryOnStatusCodes`, `retryOnStatusCodesByMethod` and `retryableTransportFailureMethods` fields are ignored: only read calls are retried, on a 429, a 5xx, a read timeout or a refused connection."
+        description = """
+            Optional Kestra HTTP configuration (timeouts, proxy) applied to Fivetran calls. Its `retry` policy, when \
+            set, replaces `maxAttempts` and `initialRetryDelay` as the plugin's retry policy; it is applied once by \
+            the plugin, never stacked with the HTTP client's own retry. Its `retryOnStatusCodes`, \
+            `retryOnStatusCodesByMethod` and `retryableTransportFailureMethods` fields are ignored: only read calls \
+            are retried, on a 429, a 5xx, a read timeout or a refused connection."""
     )
     @PluginProperty(group = "advanced")
     protected HttpConfiguration options;
 
     @Schema(
         title = "Maximum number of attempts on transient errors",
-        description = "Total attempts including the first call, not just retries. Default: 3. Ignored when `options.retry` is set, which then defines the retry policy."
+        description = """
+            Total attempts including the first call, not just retries. Default: 3. Ignored when `options.retry` is \
+            set, which then defines the retry policy."""
     )
     @Builder.Default
     @PluginProperty(group = "advanced")
@@ -143,7 +150,9 @@ public abstract class AbstractFivetranConnection extends Task {
 
     @Schema(
         title = "Initial delay before the first retry",
-        description = "Backoff grows from this delay, capped at 30 seconds. Default: 1 second. Ignored when `options.retry` is set, which then defines the retry policy."
+        description = """
+            Backoff grows from this delay, capped at 30 seconds. Default: 1 second. Ignored when `options.retry` is \
+            set, which then defines the retry policy."""
     )
     @Builder.Default
     @PluginProperty(group = "advanced")
@@ -174,7 +183,7 @@ public abstract class AbstractFivetranConnection extends Task {
 
         HttpConfiguration httpConfiguration = builder.build();
 
-        AbstractRetry retryPolicy = userRetry != null ? userRetry : defaultRetry(runContext);
+        var retryPolicy = userRetry != null ? userRetry : defaultRetry(runContext);
 
         try (HttpClient client = new HttpClient(runContext, httpConfiguration)) {
             return RetryUtils.<HttpResponse<RES>, HttpClientException> of(
@@ -729,7 +738,7 @@ public abstract class AbstractFivetranConnection extends Task {
                 metadata.put("sourceTable", sourceTable);
                 putIfNotNull(metadata, "syncMode", table.getSyncMode());
 
-                Asset output = Custom.builder()
+                var output = Custom.builder()
                     .id(sanitizeAssetId(joinSegments(database, schemaName, tableName)))
                     .type(TABLE_ASSET_TYPE)
                     .metadata(metadata)

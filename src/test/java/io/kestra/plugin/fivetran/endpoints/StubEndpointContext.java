@@ -11,6 +11,7 @@ import java.util.Map;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+import io.kestra.core.exceptions.KestraRuntimeException;
 import io.kestra.core.plugins.endpoint.PluginEndpointContext;
 import io.kestra.core.plugins.endpoint.PluginEndpointResponse;
 import io.kestra.core.plugins.endpoint.ScopedStorage;
@@ -23,6 +24,12 @@ final class StubEndpointContext implements PluginEndpointContext {
     private final Map<String, List<String>> parameters = new HashMap<>();
     private final Map<String, Object> outputs = new HashMap<>();
     private final Map<URI, byte[]> files = new HashMap<>();
+    private boolean failingOutputs;
+
+    StubEndpointContext failingOutputs() {
+        failingOutputs = true;
+        return this;
+    }
 
     StubEndpointContext param(String name, String value) {
         parameters.put(name, List.of(value));
@@ -70,7 +77,13 @@ final class StubEndpointContext implements PluginEndpointContext {
 
     @Override
     public TaskRunOutputsFetcher outputs() {
-        return () -> outputs;
+        return () ->
+        {
+            if (failingOutputs) {
+                throw new KestraRuntimeException("outputs unavailable");
+            }
+            return outputs;
+        };
     }
 
     @Override
