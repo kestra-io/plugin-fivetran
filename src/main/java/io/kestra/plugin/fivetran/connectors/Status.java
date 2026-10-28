@@ -244,8 +244,7 @@ public class Status extends AbstractFivetranConnection implements RunnableTask<S
         return finish(runContext, lastSeenConnectors.get(), finalStates);
     }
 
-    // Runs once, on the final state: the schema config is read here so polling never pays for it, and
-    // lineage and the table breakdown share that one read.
+    // Runs once on the final state so polling never pays for the schema read.
     private Output finish(RunContext runContext, Map<String, Connector> connectors, Map<String, ConnectorState> states)
         throws IOException {
         logStates(runContext.logger(), states);

@@ -273,6 +273,8 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
 
         ZonedDateTime previousCompletedDate = previousConnector.completedDate();
         Duration rMaxDuration = runContext.render(this.maxDuration).as(Duration.class).orElseThrow();
+        var queuedBehindRunning = wasSyncing && !reattached && !rForce && !staleSync;
+        var firstCompletionWhileSyncing = new AtomicReference<ZonedDateTime>();
         AtomicReference<Exception> lastTransientError = new AtomicReference<>();
         Connector finalConnector;
         try {
@@ -292,16 +294,17 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
                         throw e;
                     }
 
-                    // A non-forced trigger while a sync is in flight is queued behind it, so the first completion
-                    // seen while still syncing belongs to that earlier sync, not ours.
-                    if (
-                        current.completedDate() != null
-                            && (previousCompletedDate == null || current.completedDate().isAfter(previousCompletedDate))
-                            && !isSyncing(current)
-                    ) {
+                    var completedDate = current.completedDate();
+                    if (completedDate == null || (previousCompletedDate != null && !completedDate.isAfter(previousCompletedDate))) {
+                        return null;
+                    }
+                    if (!queuedBehindRunning || !isSyncing(current)) {
                         return current;
                     }
-                    return null;
+
+                    // Queued and still syncing: the first completion is the earlier sync's, so accept only a later one.
+                    var first = firstCompletionWhileSyncing.compareAndExchange(null, completedDate);
+                    return first != null && completedDate.isAfter(first) ? current : null;
                 }),
                 rPollFrequency,
                 rMaxDuration

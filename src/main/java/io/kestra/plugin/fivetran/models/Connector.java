@@ -81,8 +81,7 @@ public class Connector {
     @JsonProperty("service")
     String service;
 
-    // Source connection settings, secrets are masked by Fivetran but may not always be. Kept out of
-    // toString and never logged; only SourceLocation reads its location keys.
+    // May carry unmasked secrets, so it stays out of toString and logs.
     @JsonProperty("config")
     @ToString.Exclude
     Map<String, Object> config;

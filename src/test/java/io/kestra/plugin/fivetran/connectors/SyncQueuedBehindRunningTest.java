@@ -14,6 +14,7 @@ import com.google.common.collect.ImmutableMap;
 import io.kestra.core.junit.annotations.KestraTest;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.runners.RunContextFactory;
+import io.kestra.core.utils.IdUtils;
 
 import jakarta.inject.Inject;
 
@@ -23,6 +24,7 @@ import static com.github.tomakehurst.wiremock.client.WireMock.post;
 import static com.github.tomakehurst.wiremock.client.WireMock.stubFor;
 import static com.github.tomakehurst.wiremock.client.WireMock.urlEqualTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @KestraTest
 @WireMockTest
@@ -57,6 +59,8 @@ class SyncQueuedBehindRunningTest {
         stubGet("QUEUED_DONE", "QUEUED_DONE", T2, "scheduled");
 
         Sync.Output output = Sync.builder()
+            .id("sync_" + IdUtils.create())
+            .type(Sync.class.getName())
             .apiKey(Property.ofValue("dummy-api-key"))
             .apiSecret(Property.ofValue("dummy-api-secret"))
             .connectorId(Property.ofValue(CONNECTOR_ID))
@@ -68,6 +72,76 @@ class SyncQueuedBehindRunningTest {
 
         assertEquals(ZonedDateTime.parse(T2).toInstant(), output.getSucceededAt().toInstant());
         assertEquals("scheduled", output.getFreshness().getSyncState());
+    }
+
+    @Test
+    @DisplayName("Should return on the first completion even if the next sync is already running, for a plain trigger")
+    void returnsOnFirstCompletionWhenNotQueued(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubGet(Scenario.STARTED, "TRIGGER", T0, "scheduled");
+        stubFor(
+            post(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync"))
+                .inScenario(SCENARIO)
+                .whenScenarioStateIs("TRIGGER")
+                .willSetStateTo("DONE")
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(SyncTestFixtures.SYNC_TRIGGERED_BODY)
+                )
+        );
+        stubGet("DONE", "DONE", T1, "syncing");
+
+        var output = run(wmRuntimeInfo, false);
+
+        assertEquals(ZonedDateTime.parse(T1).toInstant(), output.getSucceededAt().toInstant());
+    }
+
+    @Test
+    @DisplayName("Should return on the first completion even if the next sync is already running, after a reattach")
+    void returnsOnFirstCompletionWhenReattached(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubGet(Scenario.STARTED, "DONE", T0, "syncing");
+        stubGet("DONE", "DONE", T1, "syncing");
+
+        var output = run(wmRuntimeInfo, true);
+
+        assertEquals(ZonedDateTime.parse(T1).toInstant(), output.getSucceededAt().toInstant());
+        assertTrue(output.isReattached());
+    }
+
+    @Test
+    @DisplayName("Should accept a later completion seen while still syncing once the queued trigger's first completion was recorded")
+    void acceptsSecondCompletionWhileStillSyncingWhenQueued(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubGet(Scenario.STARTED, "TRIGGER", T0, "syncing");
+        stubFor(
+            post(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync"))
+                .inScenario(SCENARIO)
+                .whenScenarioStateIs("TRIGGER")
+                .willSetStateTo("FIRST")
+                .willReturn(
+                    aResponse().withStatus(200).withHeader("Content-Type", "application/json")
+                        .withBody(SyncTestFixtures.SYNC_TRIGGERED_BODY)
+                )
+        );
+        stubGet("FIRST", "SECOND", T1, "syncing");
+        stubGet("SECOND", "SECOND", T2, "syncing");
+
+        var output = run(wmRuntimeInfo, false);
+
+        assertEquals(ZonedDateTime.parse(T2).toInstant(), output.getSucceededAt().toInstant());
+    }
+
+    private Sync.Output run(WireMockRuntimeInfo wmRuntimeInfo, boolean reattach) throws Exception {
+        return Sync.builder()
+            .id("sync_" + IdUtils.create())
+            .type(Sync.class.getName())
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .connectorId(Property.ofValue(CONNECTOR_ID))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .reattach(Property.ofValue(reattach))
+            .pollFrequency(Property.ofValue(Duration.ofMillis(100)))
+            .maxDuration(Property.ofValue(Duration.ofSeconds(10)))
+            .build()
+            .run(runContextFactory.of(ImmutableMap.of()));
     }
 
     private void stubGet(String fromState, String toState, String succeededAt, String syncState) {

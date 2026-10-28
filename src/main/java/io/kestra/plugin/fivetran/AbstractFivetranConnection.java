@@ -433,8 +433,14 @@ public abstract class AbstractFivetranConnection extends Task {
 
     /**
      * Whether automatic asset emission is enabled on this task. Checked before any lineage read so a task
-     * with assets off never pays for the extra destination and schema calls.
+     * with assets off never pays for the destination call.
      */
+    protected boolean assetsEnabled(RunContext runContext) throws IllegalVariableEvaluationException {
+        AssetsDeclaration declaration = this.getAssets();
+        return declaration != null
+            && runContext.render(declaration.getEnableAuto()).as(Boolean.class).orElse(false);
+    }
+
     // The warning path must not throw, so an expression that fails to render counts as lineage off.
     private boolean lineageEnabledQuietly(RunContext runContext) {
         try {
@@ -442,12 +448,6 @@ public abstract class AbstractFivetranConnection extends Task {
         } catch (Exception e) {
             return false;
         }
-    }
-
-    protected boolean assetsEnabled(RunContext runContext) throws IllegalVariableEvaluationException {
-        AssetsDeclaration declaration = this.getAssets();
-        return declaration != null
-            && runContext.render(declaration.getEnableAuto()).as(Boolean.class).orElse(false);
     }
 
     /**
@@ -532,8 +532,7 @@ public abstract class AbstractFivetranConnection extends Task {
                 } catch (Exception e) {
                     var assetId = emit.outputs().getFirst().getId();
                     failures.record(connectorId, "emit asset '" + assetId + "'", e);
-                    // An emit failure is almost always the asset queue being down rather than one bad asset,
-                    // so the rest of this connector's emits would fail the same way, one log line each.
+                    // Emit failures are usually a queue outage, so skip the rest instead of logging each one.
                     failures.skipped(connectorId, emits.size() - i - 1);
                     break;
                 }
@@ -611,7 +610,6 @@ public abstract class AbstractFivetranConnection extends Task {
      * sync state have no table-level equivalent. Its id stays {@code groupId.schema} so upgrading the
      * plugin does not rename assets that already exist.
      */
-
     private static Asset connectorAsset(String connectorId, Connector connector, String syncState) {
         String schema = connector.destinationSchemaName();
 
@@ -738,8 +736,7 @@ public abstract class AbstractFivetranConnection extends Task {
         }
     }
 
-    // Source and destination side of a table can share a name across systems, so a source that cannot be
-    // tied to a warehouse database stays External rather than guessing an id another plugin might also emit.
+    // An untied source stays External because a guessed id could collide with one another plugin emits.
     private static AssetIdentifier sourceInput(
         String connectorId,
         Optional<SourceLocation.Resolved> source,
