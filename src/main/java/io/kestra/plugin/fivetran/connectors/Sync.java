@@ -1,14 +1,21 @@
 package io.kestra.plugin.fivetran.connectors;
 
+import java.io.IOException;
 import java.net.URI;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.ZonedDateTime;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import org.slf4j.Logger;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
 
 import io.kestra.core.exceptions.IllegalVariableEvaluationException;
 import io.kestra.core.http.HttpRequest;
@@ -19,6 +26,7 @@ import io.kestra.core.models.annotations.Metric;
 import io.kestra.core.models.annotations.Plugin;
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.executions.metrics.Counter;
+import io.kestra.core.models.flows.State;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.RunnableTask;
 import io.kestra.core.runners.RunContext;
@@ -42,7 +50,16 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
 @NoArgsConstructor
 @Schema(
     title = "Trigger and optionally watch connector sync",
-    description = "Starts a Fivetran connector sync through the Fivetran API. Can force-cancel and restart an in-progress sync, or re-attach to one already in progress with `reattach`. Waits for completion by default (up to 60 minutes) and fails if the connector reports a failure. With `assets.enableAuto` set, emits one asset per table the connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph."
+    description = """
+        Starts a Fivetran connector sync through the Fivetran API.
+        Can force-cancel and restart an in-progress sync, or re-attach to one already in progress with `reattach`.
+        Waits for completion by default (up to 60 minutes) and fails if the connector reports a failure.
+        Fails right away on a paused connector, since Fivetran accepts the sync request but starts nothing.
+        A completion Fivetran reports while the connector is still syncing waits up to 1 minute for the syncing state to end before it is accepted, so the task does not return before the sync has finished, and a busy connector whose next sync starts right away still returns within that minute.
+        With `assets.enableAuto` set and `wait: true`, emits one asset per table the connector writes, with the id `database.schema.name` so it joins the dbt model reading that table in the lineage graph, and the source table as its input: a `Table` asset for database sources (e.g. PostgreSQL, MySQL, SQL Server, Snowflake, BigQuery) or an `External` asset `connectorId.schema.table` otherwise. With `wait: false` no asset is emitted, since the sync has not finished when the task returns.
+        If building or emitting an asset fails, `assets.assetFailureBehavior` applies: `FAIL` fails the task, `WARN` (the default) ends it in WARNING, `IGNORE` only logs at debug level.
+        Whatever `assets.enableAuto` is set to, reads the connector's schema config once (one extra GET) to output a per-table breakdown file (`tables`, `tableCount`, `enabledTableCount`) and a `freshness` summary with the connector's alert codes; a failed schema read logs a warning and never fails the task.
+        """
 )
 @Plugin(
     examples = {
@@ -75,6 +92,29 @@ import static io.kestra.core.utils.Rethrow.throwSupplier;
                     connectorId: "connector_id"
                     assets:
                       enableAuto: true
+                """
+        ),
+        @Example(
+            full = true,
+            title = "Sync a connector, then read its freshness and per-table breakdown.",
+            code = """
+                id: fivetran_sync_with_breakdown
+                namespace: company.team
+
+                tasks:
+                  - id: sync
+                    type: io.kestra.plugin.fivetran.connectors.Sync
+                    apiKey: "{{ secret('FIVETRAN_API_KEY') }}"
+                    apiSecret: "{{ secret('FIVETRAN_API_SECRET') }}"
+                    connectorId: "connector_id"
+                    wait: true
+
+                  - id: report
+                    type: io.kestra.plugin.core.log.Log
+                    message: |
+                      Alerts: {{ outputs.sync.freshness.alertCount }},
+                      enabled tables: {{ outputs.sync.enabledTableCount }} of {{ outputs.sync.tableCount }},
+                      breakdown file: {{ outputs.sync.tables }}
                 """
         ),
         @Example(
@@ -117,7 +157,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
 
     @Schema(
         title = "Wait for sync completion",
-        description = "When true (default), poll the connector until the sync finishes to capture status and logs. Set to false to return once the sync has been triggered, without waiting for it. `succeededAt` is then null, since the sync is still running on Fivetran. With `assets.enableAuto` set, lineage is still emitted in that case, which costs two extra reads before the task returns."
+        description = "When true (default), poll the connector until the sync finishes to capture status and logs. Set to false to return once the sync has been triggered, without waiting for it. `succeededAt` is then null, since the sync is still running on Fivetran. No assets are emitted in that case, since the sync has not finished. To record lineage after the sync, add a downstream `io.kestra.plugin.fivetran.connectors.Status` task with `assets.enableAuto`."
     )
     @Builder.Default
     Property<Boolean> wait = Property.ofValue(true);
@@ -188,6 +228,9 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         }
 
         Connector previousConnector = fetchConnector(runContext);
+        if (Boolean.TRUE.equals(previousConnector.getPaused())) {
+            throw pausedConnector(connectorId);
+        }
 
         var rForce = runContext.render(this.force).as(Boolean.class).orElseThrow();
         var rReattach = runContext.render(this.reattach).as(Boolean.class).orElse(false);
@@ -225,6 +268,10 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             if (syncResponse == null) {
                 throw new IllegalStateException("Missing body on trigger");
             }
+            // Paused between the status read and the trigger: Fivetran still answers 200 Success.
+            if (syncResponse.getMessage() != null && syncResponse.getMessage().toLowerCase(Locale.ROOT).contains("is paused")) {
+                throw pausedConnector(connectorId);
+            }
 
             logger.info("Job status {} with response: {}", syncHttpResponse.getStatus(), syncResponse);
         }
@@ -232,12 +279,14 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         runContext.metric(Counter.of("reattached", reattached ? 1 : 0));
 
         if (!runContext.render(this.wait).as(Boolean.class).orElseThrow()) {
-            emitAssets(runContext, connectorId, previousConnector);
-            return Output.builder().connectorId(connectorId).reattached(reattached).build();
+            var outputBuilder = Output.builder().connectorId(connectorId).reattached(reattached);
+            return withBreakdown(runContext, connectorId, previousConnector, ConnectorFreshness.from(previousConnector, null), outputBuilder, false);
         }
 
         ZonedDateTime previousCompletedDate = previousConnector.completedDate();
         Duration rMaxDuration = runContext.render(this.maxDuration).as(Duration.class).orElseThrow();
+        var queuedBehindRunning = wasSyncing && !reattached && !rForce && !staleSync;
+        var completion = new CompletionWatch(connectorId, previousCompletedDate, queuedBehindRunning, COMPLETION_GRACE, Instant::now, logger);
         AtomicReference<Exception> lastTransientError = new AtomicReference<>();
         Connector finalConnector;
         try {
@@ -257,28 +306,35 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
                         throw e;
                     }
 
-                    if (
-                        current.completedDate() != null
-                            && (previousCompletedDate == null || current.completedDate().isAfter(previousCompletedDate))
-                    ) {
-                        return current;
-                    }
-                    return null;
+                    return completion.accept(current);
                 }),
                 rPollFrequency,
                 rMaxDuration
             );
         } catch (TimeoutException e) {
-            // If polling only ever saw transient errors, name the last one so the failure is diagnosable
-            // instead of surfacing Await's generic "failed to terminate" message with no cause.
-            Exception last = lastTransientError.get();
-            if (last == null) {
-                throw e;
+            // The sync completed but Fivetran still reported syncing when maxDuration ran out: the completion is real,
+            // so return it rather than failing a sync that finished.
+            var candidate = completion.candidate();
+            if (candidate.isPresent()) {
+                logger.warn(
+                    "Connector '{}' completed at {} but Fivetran still reported it syncing when maxDuration ({}) ran out, returning that completion",
+                    connectorId,
+                    candidate.get().completedDate(),
+                    rMaxDuration
+                );
+                finalConnector = candidate.get();
+            } else {
+                // If polling only ever saw transient errors, name the last one so the failure is diagnosable
+                // instead of surfacing Await's generic "failed to terminate" message with no cause.
+                Exception last = lastTransientError.get();
+                if (last == null) {
+                    throw e;
+                }
+                throw new TimeoutException(
+                    "Connector '" + connectorId + "' did not complete within " + rMaxDuration
+                        + ", last error while polling: " + last.getMessage()
+                );
             }
-            throw new TimeoutException(
-                "Connector '" + connectorId + "' did not complete within " + rMaxDuration
-                    + ", last error while polling: " + last.getMessage()
-            );
         }
 
         if (finalConnector.hasFailed()) {
@@ -289,22 +345,44 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             );
         }
 
-        emitAssets(runContext, connectorId, finalConnector);
-
-        return Output.builder()
+        var outputBuilder = Output.builder()
             .connectorId(connectorId)
             .succeededAt(finalConnector.getSucceededAt())
-            .reattached(reattached)
-            .build();
+            .reattached(reattached);
+        return withBreakdown(runContext, connectorId, finalConnector, ConnectorFreshness.from(finalConnector, true), outputBuilder, true);
     }
 
-    // Single-connector view of the shared lineage helper.
-    private void emitAssets(RunContext runContext, String connectorId, Connector connector) {
-        ConnectorStatusResponse status = connector.getStatus();
-        Map<String, String> syncStates = new HashMap<>();
-        syncStates.put(connectorId, status != null ? status.getSyncState() : null);
+    // The schema config is read once and shared by lineage and the table breakdown.
+    private Output withBreakdown(
+        RunContext runContext,
+        String connectorId,
+        Connector connector,
+        ConnectorFreshness freshness,
+        Output.OutputBuilder outputBuilder,
+        boolean emitAssets) throws IOException {
+        var schemas = readSchemas(runContext, connectorId);
 
-        this.emitAssets(runContext, Map.of(connectorId, connector), syncStates);
+        // With `wait: false` the connector is the pre-trigger snapshot, which describes no finished sync.
+        if (emitAssets) {
+            var syncStates = new HashMap<String, String>();
+            syncStates.put(connectorId, freshness.getSyncState());
+            this.emitAssets(
+                runContext,
+                Map.of(connectorId, connector),
+                syncStates,
+                schemas != null ? Map.of(connectorId, schemas) : Map.of()
+            ).ifPresent(outputBuilder::state);
+        }
+
+        outputBuilder.freshness(freshness);
+        var breakdown = writeTableBreakdown(runContext, schemas);
+        if (breakdown != null) {
+            outputBuilder
+                .tables(breakdown.getUri())
+                .tableCount(breakdown.getTableCount())
+                .enabledTableCount(breakdown.getEnabledTableCount());
+        }
+        return outputBuilder.build();
     }
 
     /**
@@ -342,6 +420,101 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         return completedDate.isBefore(now.minus(maxAge));
     }
 
+    // How long a completion seen while Fivetran still reports syncing waits for the syncing state to end.
+    static final Duration COMPLETION_GRACE = Duration.ofMinutes(1);
+
+    /**
+     * Decides, poll after poll, whether the sync this task waits for has completed.
+     * <p>
+     * A completion newer than the one before the trigger is accepted as soon as Fivetran stops reporting
+     * {@code syncing}. Seen while it still reports {@code syncing}, the completion is ambiguous: a real Fivetran
+     * connector can report a completion and keep syncing for a few more seconds, and a busy connector starts its next
+     * sync right after ours. So the completion waits for the syncing state to end, for at most {@code grace}, and is
+     * then accepted anyway: a back-to-back sync costs that much and never hangs the task until maxDuration.
+     * <p>
+     * When the trigger was queued behind a sync already running, the first completion seen while syncing is that
+     * earlier sync's and is skipped.
+     */
+    static final class CompletionWatch {
+        private final ZonedDateTime baseline;
+        private final boolean queuedBehindRunning;
+        private final Duration grace;
+        private final Supplier<Instant> clock;
+        private final String connectorId;
+        private final Logger logger;
+        private ZonedDateTime earlierSyncCompletion;
+        private Connector candidate;
+        private Instant candidateSince;
+
+        CompletionWatch(String connectorId, ZonedDateTime baseline, boolean queuedBehindRunning, Duration grace, Supplier<Instant> clock, Logger logger) {
+            this.connectorId = connectorId;
+            this.logger = logger;
+            this.baseline = baseline;
+            this.queuedBehindRunning = queuedBehindRunning;
+            this.grace = grace;
+            this.clock = clock;
+        }
+
+        /** The connector once its sync is accepted as complete, null to keep polling. */
+        Connector accept(Connector current) {
+            var completedDate = current.completedDate();
+            if (completedDate == null || (baseline != null && !completedDate.isAfter(baseline))) {
+                return null;
+            }
+
+            if (!isSyncing(current)) {
+                return current;
+            }
+
+            if (queuedBehindRunning) {
+                if (earlierSyncCompletion == null) {
+                    earlierSyncCompletion = completedDate;
+                    return null;
+                }
+                if (!completedDate.isAfter(earlierSyncCompletion)) {
+                    return null;
+                }
+            }
+
+            candidate = current;
+            if (candidateSince == null) {
+                candidateSince = clock.get();
+                // Logged once per hold, so the case stays visible without one line per poll.
+                logger.debug(
+                    "Connector '{}' reports a completion at {} but is still syncing, waiting up to {} for the sync to end",
+                    connectorId,
+                    completedDate,
+                    grace
+                );
+            }
+            if (Duration.between(candidateSince, clock.get()).compareTo(grace) < 0) {
+                return null;
+            }
+            logger.debug(
+                "Connector '{}' is still syncing {} after reporting a completion at {}, accepting that completion",
+                connectorId,
+                grace,
+                completedDate
+            );
+            return current;
+        }
+
+        /** The latest completion seen while Fivetran still reported syncing, if any. */
+        Optional<Connector> candidate() {
+            return Optional.ofNullable(candidate);
+        }
+    }
+
+    /**
+     * Fivetran answers a sync request on a paused connector with 200 Success and "Connection with id '...' is
+     * paused", and starts nothing, so waiting on it could only end in a maxDuration timeout.
+     */
+    private static IllegalStateException pausedConnector(String connectorId) {
+        return new IllegalStateException(
+            "Connector '" + connectorId + "' is paused in Fivetran, which ignores sync requests on a paused connector. Resume it in Fivetran, then run the task again."
+        );
+    }
+
     private Connector fetchConnector(RunContext runContext) throws IllegalVariableEvaluationException, HttpClientException {
         String connectorId = runContext.render(this.connectorId).as(String.class).orElseThrow();
         return this.fetchConnector(runContext, connectorId);
@@ -358,7 +531,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
 
         @Schema(
             title = "Timestamp of the sync this task waited for",
-            description = "Null when `wait` is false, since the sync is still running on Fivetran when the task returns."
+            description = "The completion of the sync this task observed, as reported by Fivetran. Null when `wait` is false, since the sync is still running on Fivetran when the task returns. See `freshness.succeededAt` for the connector's last known success."
         )
         ZonedDateTime succeededAt;
 
@@ -367,5 +540,46 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             description = "True when `reattach` adopted a sync already running on the connector instead of triggering a new one."
         )
         boolean reattached;
+
+        @Schema(
+            title = "Connector freshness",
+            description = """
+                State of the connector when the task returned.
+                With `wait: true` it is read after the sync completed.
+                With `wait: false` it is the snapshot taken before the sync was triggered, so `fresh` is null and `freshness.succeededAt` is the connector's last known success, which predates the triggered sync.
+                The top-level `succeededAt` is the completion of the sync this task observed.
+                """
+        )
+        ConnectorFreshness freshness;
+
+        @Schema(
+            title = "Per-table breakdown file",
+            description = """
+                URI of an Ion file in internal storage with one row per table of the connector: `schema`, `schemaInDestination`, `schemaEnabled`, `table`, `tableInDestination`, `enabled`, `syncMode` and `enabledPatchAllowed`.
+                Null when the schema config could not be read.
+                """
+        )
+        URI tables;
+
+        @Schema(
+            title = "Number of tables",
+            description = "Every table the connector reports, enabled or not. Null when the schema config could not be read."
+        )
+        Integer tableCount;
+
+        @Schema(
+            title = "Number of enabled tables",
+            description = "Tables that are enabled and belong to an enabled schema, i.e. the ones written to the destination. Null when the schema config could not be read."
+        )
+        Integer enabledTableCount;
+
+        @JsonIgnore
+        @Getter(AccessLevel.NONE)
+        State.Type state;
+
+        @Override
+        public Optional<State.Type> finalState() {
+            return Optional.ofNullable(state);
+        }
     }
 }

@@ -6,12 +6,15 @@ import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 import org.apache.hc.core5.http.Method;
@@ -30,14 +33,18 @@ import io.kestra.core.http.client.configurations.BasicAuthConfiguration;
 import io.kestra.core.http.client.configurations.HttpConfiguration;
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.assets.Asset;
+import io.kestra.core.models.assets.AssetIdentifier;
 import io.kestra.core.models.assets.AssetsDeclaration;
 import io.kestra.core.models.assets.Custom;
+import io.kestra.core.models.assets.External;
+import io.kestra.core.models.flows.State;
 import io.kestra.core.models.property.Property;
+import io.kestra.core.models.tasks.AssetFailureBehavior;
 import io.kestra.core.models.tasks.Task;
 import io.kestra.core.models.tasks.retrys.Exponential;
-import io.kestra.core.queues.QueueException;
 import io.kestra.core.runners.AssetEmit;
 import io.kestra.core.runners.RunContext;
+import io.kestra.core.serializers.FileSerde;
 import io.kestra.core.serializers.JacksonMapper;
 import io.kestra.core.utils.RetryUtils;
 import io.kestra.plugin.fivetran.models.Connector;
@@ -47,12 +54,14 @@ import io.kestra.plugin.fivetran.models.ConnectorSchemasResponse;
 import io.kestra.plugin.fivetran.models.Destination;
 import io.kestra.plugin.fivetran.models.DestinationResponse;
 import io.kestra.plugin.fivetran.models.SchemaTable;
+import io.kestra.plugin.fivetran.models.TableBreakdown;
 
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
 import lombok.*;
 import lombok.experimental.SuperBuilder;
+import reactor.core.publisher.Flux;
 
 @SuperBuilder
 @ToString
@@ -306,6 +315,101 @@ public abstract class AbstractFivetranConnection extends Task {
     }
 
     /**
+     * Reads a connector's schema config for the table breakdown and lineage. Never throws: both are
+     * metadata about the run, so a failed read must not fail a task whose sync succeeded.
+     *
+     * @return The schemas, or null when the read failed.
+     */
+    protected Map<String, ConnectorSchema> readSchemas(RunContext runContext, String connectorId) {
+        try {
+            return fetchConnectorSchemas(runContext, connectorId);
+        } catch (Exception e) {
+            // Status and exception type only: the response body is never logged.
+            var status = e instanceof HttpClientResponseException hcre && hcre.getResponse() != null
+                ? hcre.getResponse().getStatus().getCode()
+                : null;
+            var reason = status != null ? "HTTP " + status : e.getClass().getSimpleName();
+            var consequence = lineageEnabledQuietly(runContext)
+                ? "skipping the table breakdown and table-level assets"
+                : "skipping the table breakdown";
+            var hint = status != null && (status == 401 || status == 403)
+                ? " Check that the API key may read connector schemas."
+                : "";
+            runContext.logger().warn(
+                "Could not read the schema config of connector '{}' ({}), {}.{}",
+                connectorId,
+                reason,
+                consequence,
+                hint
+            );
+            return null;
+        }
+    }
+
+    protected Map<String, Map<String, ConnectorSchema>> readAllSchemas(RunContext runContext, Collection<String> connectorIds) {
+        var schemasByConnector = new LinkedHashMap<String, Map<String, ConnectorSchema>>();
+        for (var connectorId : connectorIds) {
+            var schemas = readSchemas(runContext, connectorId);
+            if (schemas != null) {
+                schemasByConnector.put(connectorId, schemas);
+            }
+        }
+        return schemasByConnector;
+    }
+
+    /**
+     * Writes one Ion row per table to internal storage. Rows carry an explicit allow-list of fields, so
+     * nothing else from the schema config (columns, row filters, free-text reasons) reaches storage.
+     * Disabled schemas and tables are included with their flags; only {@code enabledTableCount} excludes them.
+     *
+     * @return The storage URI and counts, or null when the schemas could not be read.
+     */
+    protected TableBreakdown writeTableBreakdown(RunContext runContext, Map<String, ConnectorSchema> schemas) throws IOException {
+        if (schemas == null) {
+            return null;
+        }
+
+        var rows = new ArrayList<Map<String, Object>>();
+        var enabledTableCount = 0;
+        for (var schemaEntry : schemas.entrySet()) {
+            var schema = schemaEntry.getValue();
+            if (schema == null || schema.getTables() == null) {
+                continue;
+            }
+            var schemaInDestination = schema.destinationName(schemaEntry.getKey());
+
+            for (var tableEntry : schema.getTables().entrySet()) {
+                var table = tableEntry.getValue();
+                if (table == null) {
+                    continue;
+                }
+
+                if (schema.isEnabled() && table.isEnabled()) {
+                    enabledTableCount++;
+                }
+
+                var row = new LinkedHashMap<String, Object>();
+                row.put("schema", schemaEntry.getKey());
+                row.put("schemaInDestination", schemaInDestination);
+                row.put("schemaEnabled", schema.isEnabled());
+                row.put("table", tableEntry.getKey());
+                row.put("tableInDestination", table.destinationName(tableEntry.getKey()));
+                row.put("enabled", table.isEnabled());
+                row.put("syncMode", table.getSyncMode());
+                row.put("enabledPatchAllowed", table.getEnabledPatchSettings() != null ? table.getEnabledPatchSettings().getAllowed() : null);
+                rows.add(row);
+            }
+        }
+
+        var tempFile = runContext.workingDir().createTempFile(".ion").toFile();
+        try (var output = Files.newOutputStream(tempFile.toPath())) {
+            FileSerde.writeAll(output, Flux.fromIterable(rows)).block();
+        }
+
+        return new TableBreakdown(runContext.storage().putFile(tempFile), rows.size(), enabledTableCount);
+    }
+
+    /**
      * Reads a destination, whose config carries the warehouse database name behind a Fivetran group ID.
      *
      * @param runContext The run context used to render properties and build the HTTP client.
@@ -329,7 +433,7 @@ public abstract class AbstractFivetranConnection extends Task {
 
     /**
      * Whether automatic asset emission is enabled on this task. Checked before any lineage read so a task
-     * with assets off never pays for the extra destination and schema calls.
+     * with assets off never pays for the destination call.
      */
     protected boolean assetsEnabled(RunContext runContext) throws IllegalVariableEvaluationException {
         AssetsDeclaration declaration = this.getAssets();
@@ -337,42 +441,63 @@ public abstract class AbstractFivetranConnection extends Task {
             && runContext.render(declaration.getEnableAuto()).as(Boolean.class).orElse(false);
     }
 
+    // The warning path must not throw, so an expression that fails to render counts as lineage off.
+    private boolean lineageEnabledQuietly(RunContext runContext) {
+        try {
+            return assetsEnabled(runContext);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     /**
-     * Emits lineage for the given connectors: one table-grain asset per synced table, plus the
-     * connector-grain asset carrying the sync state. Shared by {@code Sync} and {@code Status}, because a
-     * connector on Fivetran's own schedule is never triggered through {@code Sync} and one driven from
-     * Kestra is often never read through {@code Status}, so either task alone leaves half the graph empty.
+     * Emits lineage for the given connectors: the connector-grain asset carrying the sync state, then one
+     * bundle per synced table with the source table as its input. Shared by {@code Sync} and {@code Status},
+     * because a connector on Fivetran's own schedule is never triggered through {@code Sync} and one driven
+     * from Kestra is often never read through {@code Status}, so either task alone leaves half the graph empty.
      * <p>
      * Table ids are composed as {@code database.schema.name}, the same convention plugin-dbt emits, so a
      * Fivetran-loaded table and the dbt model reading it resolve to one node and the edge forms with no
      * manual mapping. {@code database} comes from the destination rather than the group ID: a group ID is
      * a Fivetran-internal identifier, not a warehouse database, so an id built on it would be table-grain
      * but still in the wrong namespace.
+     * <p>
+     * Core never routes an exception thrown by {@code run()} through {@code assets.assetFailureBehavior},
+     * so it is applied here.
      *
      * @param runContext The run context used to render properties and emit assets.
      * @param connectors Connectors keyed by the ID they were requested with.
      * @param syncStates Optional sync state per connector ID, recorded on the connector-grain asset.
+     * @param schemasByConnector Schema config already read per connector ID, so lineage and the table
+     *        breakdown share one GET. A connector absent from it emits no table assets.
+     * @return {@code WARNING} when an asset failed under {@code WARN}, so the task can end in that state
+     * @throws IllegalStateException when an asset failed under {@code FAIL}
      */
-    protected void emitAssets(RunContext runContext, Map<String, Connector> connectors, Map<String, String> syncStates) {
+    protected Optional<State.Type> emitAssets(
+        RunContext runContext,
+        Map<String, Connector> connectors,
+        Map<String, String> syncStates,
+        Map<String, Map<String, ConnectorSchema>> schemasByConnector) {
         if (connectors == null || connectors.isEmpty()) {
-            return;
+            return Optional.empty();
         }
 
         try {
             if (!assetsEnabled(runContext)) {
-                return;
+                return Optional.empty();
             }
         } catch (Exception e) {
             // `enableAuto` is a Property, so it can be an expression that fails to render. Rendering happens
             // after the sync has already succeeded, and lineage is metadata about the run rather than the run
             // itself, so a gate that cannot be read skips lineage instead of failing the task.
             runContext.logger().warn("Could not read assets.enableAuto, skipping lineage.", e);
-            return;
+            return Optional.empty();
         }
 
         // Several connectors usually share one destination, so it is resolved once per group ID. Misses are
         // cached too, so a destination that cannot be read is not re-requested per connector.
         var destinationByGroup = new HashMap<String, Destination>();
+        var failures = new AssetFailures(runContext, this.getAssets());
 
         for (Map.Entry<String, Connector> entry : connectors.entrySet()) {
             String connectorId = entry.getKey();
@@ -381,22 +506,103 @@ public abstract class AbstractFivetranConnection extends Task {
                 continue;
             }
 
-            var assets = new ArrayList<Asset>();
-            assets.add(connectorAsset(connectorId, connector, syncStates == null ? null : syncStates.get(connectorId)));
-            assets.addAll(tableAssets(runContext, connectorId, connector, destinationByGroup));
-
+            var syncState = syncStates == null ? null : syncStates.get(connectorId);
+            List<AssetEmit> emits;
             try {
-                runContext.assets().emit(new AssetEmit(List.of(), assets));
-            } catch (UnsupportedOperationException e) {
-                // OSS edition or tests where EE assets are not available. Only emit() reveals this, so one
-                // connector's lineage reads are already spent by the time we find out; returning here keeps
-                // it to that one rather than repeating it per connector.
-                runContext.logger().debug("Asset emission is not supported in this edition, skipping.");
-                return;
-            } catch (QueueException | IllegalVariableEvaluationException e) {
-                runContext.logger().warn("Unable to emit fivetran asset for connector '{}'", connectorId, e);
+                emits = new ArrayList<>();
+                emits.add(new AssetEmit(List.of(), List.of(connectorAsset(connectorId, connector, syncState))));
+                emits.addAll(
+                    tableEmits(runContext, connectorId, connector, syncState, destinationByGroup, schemasByConnector.get(connectorId))
+                );
+            } catch (Exception e) {
+                failures.record(connectorId, "build the assets", e);
+                continue;
+            }
+
+            for (int i = 0; i < emits.size(); i++) {
+                var emit = emits.get(i);
+                try {
+                    runContext.assets().emit(emit);
+                } catch (UnsupportedOperationException e) {
+                    // OSS edition or tests where EE assets are not available. Only emit() reveals this, so one
+                    // connector's lineage reads are already spent by the time we find out; returning here keeps
+                    // it to that one rather than repeating it per connector.
+                    runContext.logger().debug("Asset emission is not supported in this edition, skipping.");
+                    return failures.warned() ? Optional.of(State.Type.WARNING) : Optional.empty();
+                } catch (Exception e) {
+                    var assetId = emit.outputs().getFirst().getId();
+                    failures.record(connectorId, "emit asset '" + assetId + "'", e);
+                    // Emit failures are usually a queue outage, so skip the rest instead of logging each one.
+                    failures.skipped(connectorId, emits.size() - i - 1);
+                    break;
+                }
             }
         }
+
+        return failures.warned() ? Optional.of(State.Type.WARNING) : Optional.empty();
+    }
+
+    /** Applies {@code assets.assetFailureBehavior} to asset build and emit failures. */
+    private static final class AssetFailures {
+        private final RunContext runContext;
+        private final AssetsDeclaration declaration;
+        private AssetFailureBehavior behavior;
+        private boolean warned;
+
+        private AssetFailures(RunContext runContext, AssetsDeclaration declaration) {
+            this.runContext = runContext;
+            this.declaration = declaration;
+        }
+
+        boolean warned() {
+            return warned;
+        }
+
+        void record(String connectorId, String what, Exception cause) {
+            var message = "Failed to " + what + " for connector '" + connectorId + "': " + cause.getMessage();
+            switch (behavior()) {
+                case FAIL -> throw new IllegalStateException(
+                    message + ". Set assets.assetFailureBehavior to WARN or IGNORE to not fail the task.", cause
+                );
+                case WARN -> {
+                    runContext.logger().warn(message);
+                    warned = true;
+                }
+                case IGNORE -> runContext.logger().debug(message);
+            }
+        }
+
+        // Only reached under WARN or IGNORE: record() has already thrown under FAIL.
+        void skipped(String connectorId, int count) {
+            if (count == 0) {
+                return;
+            }
+            var message = "Skipped the remaining " + count + " asset(s) of connector '" + connectorId + "' after an emit failure.";
+            if (behavior() == AssetFailureBehavior.WARN) {
+                runContext.logger().warn(message);
+            } else {
+                runContext.logger().debug(message);
+            }
+        }
+
+        // Rendered once per run, not per failure. Core falls back to WARN when the property cannot be rendered.
+        private AssetFailureBehavior behavior() {
+            if (behavior == null) {
+                try {
+                    behavior = declaration.getAssetFailureBehavior() == null
+                        ? AssetFailureBehavior.WARN
+                        : runContext.render(declaration.getAssetFailureBehavior()).as(AssetFailureBehavior.class).orElse(AssetFailureBehavior.WARN);
+                } catch (Exception e) {
+                    behavior = AssetFailureBehavior.WARN;
+                }
+            }
+            return behavior;
+        }
+    }
+
+    // GET /v2/connectors/{id} reports the type as connector_type_id; only the v1 payload carries service.
+    private static String connectorType(Connector connector) {
+        return connector.getConnectorTypeId() != null ? connector.getConnectorTypeId() : connector.getService();
     }
 
     /**
@@ -423,11 +629,18 @@ public abstract class AbstractFivetranConnection extends Task {
     }
 
     /**
-     * One asset per table the connector writes, id {@code database.schema.name}. Returns empty rather than
-     * throwing when the database or the schema config cannot be read: lineage is metadata about the run,
-     * never the run itself, so a lineage read failure must not fail a sync that actually succeeded.
+     * One emit per table the connector writes, id {@code database.schema.name}, with the source table as
+     * input. Returns empty rather than throwing when the database or the schema config is unavailable:
+     * lineage is metadata about the run, never the run itself, so a lineage read failure must not fail a
+     * sync that actually succeeded.
      */
-    private List<Asset> tableAssets(RunContext runContext, String connectorId, Connector connector, Map<String, Destination> destinationByGroup) {
+    private List<AssetEmit> tableEmits(
+        RunContext runContext,
+        String connectorId,
+        Connector connector,
+        String syncState,
+        Map<String, Destination> destinationByGroup,
+        Map<String, ConnectorSchema> schemas) {
         Destination destination = resolveDestination(runContext, connector, destinationByGroup);
         String database = destination != null ? destination.databaseName() : null;
         if (database == null) {
@@ -443,35 +656,38 @@ public abstract class AbstractFivetranConnection extends Task {
             return List.of();
         }
 
-        Map<String, ConnectorSchema> schemas;
-        try {
-            schemas = fetchConnectorSchemas(runContext, connectorId);
-        } catch (Exception e) {
-            runContext.logger().warn(
-                "Could not read the schema config of connector '{}', emitting the connector asset only.",
-                connectorId,
-                e
-            );
+        // A failed schema read was already warned about by readSchemas.
+        if (schemas == null) {
             return List.of();
         }
 
-        var assets = new ArrayList<Asset>();
+        var source = SourceLocation.resolve(connectorType(connector), connector.getConfig());
+        if (source.isEmpty()) {
+            runContext.logger().debug(
+                "Connector '{}' has no resolvable database source location, its source tables are emitted as External assets.",
+                connectorId
+            );
+        }
+
+        var emits = new ArrayList<AssetEmit>();
         var enabledSchemas = 0;
-        for (Map.Entry<String, ConnectorSchema> schemaEntry : schemas.entrySet()) {
+        for (var schemaEntry : schemas.entrySet()) {
             ConnectorSchema schema = schemaEntry.getValue();
             // A disabled schema or table is not written to the destination, so it is not an asset.
             if (schema == null || !schema.isEnabled() || schema.getTables() == null) {
                 continue;
             }
-            String schemaName = schema.destinationName(schemaEntry.getKey());
+            var sourceSchema = schemaEntry.getKey();
+            String schemaName = schema.destinationName(sourceSchema);
             enabledSchemas++;
 
-            for (Map.Entry<String, SchemaTable> tableEntry : schema.getTables().entrySet()) {
+            for (var tableEntry : schema.getTables().entrySet()) {
                 SchemaTable table = tableEntry.getValue();
                 if (table == null || !table.isEnabled()) {
                     continue;
                 }
-                String tableName = table.destinationName(tableEntry.getKey());
+                var sourceTable = tableEntry.getKey();
+                String tableName = table.destinationName(sourceTable);
 
                 var metadata = new LinkedHashMap<String, Object>();
                 // plugin-dbt sets `system` to the warehouse adapter, not to itself. Both plugins write this
@@ -484,14 +700,19 @@ public abstract class AbstractFivetranConnection extends Task {
                 metadata.put("schema", schemaName);
                 metadata.put("name", tableName);
                 metadata.put("connectorId", connectorId);
+                putIfNotNull(metadata, "lastSyncedAt", connector.getSucceededAt() != null ? connector.getSucceededAt().toString() : null);
+                putIfNotNull(metadata, "syncState", syncState);
+                putIfNotNull(metadata, "service", connectorType(connector));
+                metadata.put("sourceSchema", sourceSchema);
+                metadata.put("sourceTable", sourceTable);
+                putIfNotNull(metadata, "syncMode", table.getSyncMode());
 
-                assets.add(
-                    Custom.builder()
-                        .id(sanitizeAssetId(joinSegments(database, schemaName, tableName)))
-                        .type(TABLE_ASSET_TYPE)
-                        .metadata(metadata)
-                        .build()
-                );
+                var output = Custom.builder()
+                    .id(sanitizeAssetId(joinSegments(database, schemaName, tableName)))
+                    .type(TABLE_ASSET_TYPE)
+                    .metadata(metadata)
+                    .build();
+                emits.add(new AssetEmit(List.of(sourceInput(connectorId, source, sourceSchema, sourceTable)), List.<Asset> of(output)));
             }
         }
 
@@ -503,10 +724,30 @@ public abstract class AbstractFivetranConnection extends Task {
             database,
             enabledSchemas,
             schemas.size(),
-            assets.size()
+            emits.size()
         );
 
-        return assets;
+        return emits;
+    }
+
+    private static void putIfNotNull(Map<String, Object> metadata, String key, Object value) {
+        if (value != null) {
+            metadata.put(key, value);
+        }
+    }
+
+    // An untied source stays External because a guessed id could collide with one another plugin emits.
+    private static AssetIdentifier sourceInput(
+        String connectorId,
+        Optional<SourceLocation.Resolved> source,
+        String sourceSchema,
+        String sourceTable) {
+        if (source.isEmpty()) {
+            return new AssetIdentifier(null, null, sanitizeAssetId(joinSegments(connectorId, sourceSchema, sourceTable)), External.ASSET_TYPE);
+        }
+        var database = source.get().database();
+        var id = database == null ? joinSegments(sourceSchema, sourceTable) : joinSegments(database, sourceSchema, sourceTable);
+        return new AssetIdentifier(null, null, sanitizeAssetId(id), TABLE_ASSET_TYPE);
     }
 
     /**
@@ -558,9 +799,9 @@ public abstract class AbstractFivetranConnection extends Task {
         return id.toString();
     }
 
-    // Kept in step with the narrowest Asset.id contract this plugin compiles against: core 1.3.13 allows
-    // ^[a-zA-Z0-9][a-zA-Z0-9._-]* and rejects ':', which a later core added. Anything outside that set
-    // becomes '_' rather than emit an id the framework declares invalid.
+    // Allows ^[a-zA-Z0-9][a-zA-Z0-9._-]*, the set this plugin has always built ids from. Newer cores also
+    // accept ':', but it is still replaced so ids already emitted stay stable across upgrades. Anything
+    // outside that set becomes '_'.
     static String sanitizeSegment(String segment) {
         return DISALLOWED_ID_CHARS.matcher(segment).replaceAll("_");
     }

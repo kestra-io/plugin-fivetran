@@ -261,13 +261,13 @@ class TableAssetsTest {
         task.run(runContextFactory.of(task, Map.of()));
 
         assertThat(ids(emittedAssets()), contains(GROUP_ID + "." + SCHEMA));
-        // Without a database no table-grain id can be composed, so the schema read is not worth paying for.
-        verify(exactly(0), getRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/schemas")));
+        // The schema read feeds the table breakdown too, so it still happens exactly once without a database.
+        verify(exactly(1), getRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/schemas")));
     }
 
     @Test
-    @DisplayName("Should make no lineage call at all when assets.enableAuto is unset")
-    void makesNoLineageCallWhenAssetsAreDisabled(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+    @DisplayName("Should make no destination call when assets.enableAuto is unset")
+    void makesNoDestinationCallWhenAssetsAreUnset(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         stubConnector(wmRuntimeInfo);
         stubDestination("""
             {"database": "analytics"}
@@ -281,7 +281,8 @@ class TableAssetsTest {
 
         assertThat(assetManagerFactory.allEmitted(), hasSize(0));
         verify(exactly(0), getRequestedFor(urlEqualTo("/v2/destinations/" + GROUP_ID)));
-        verify(exactly(0), getRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/schemas")));
+        // Only the table breakdown reads the schema config when lineage is off.
+        verify(exactly(1), getRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/schemas")));
     }
 
     @Test
@@ -375,7 +376,7 @@ class TableAssetsTest {
             .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
             .connectorIds(Property.ofValue(List.of(CONNECTOR_ID)))
             .wait(Property.ofValue(false))
-            .assets(new AssetsDeclaration(Property.<Boolean> ofExpression("{{ missing.variable }}"), null, null))
+            .assets(new AssetsDeclaration(Property.<Boolean> ofExpression("{{ missing.variable }}"), null, null, null))
             .build();
 
         // The status read itself succeeded, so an unreadable lineage gate must not turn the task red.
@@ -413,8 +414,8 @@ class TableAssetsTest {
     }
 
     @Test
-    @DisplayName("Should emit table assets from Sync even when it does not wait for the sync to finish")
-    void syncWithoutWaitStillEmitsTableAssets(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+    @DisplayName("Should emit no assets from Sync when it does not wait, since the sync has not finished")
+    void syncWithoutWaitEmitsNoAssets(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
         stubFor(
             get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID))
                 .willReturn(json(connectorBody(CONNECTOR_ID, SCHEMA, isoNow(-1440))))
@@ -445,7 +446,7 @@ class TableAssetsTest {
 
         task.run(runContextFactory.of(task, Map.of()));
 
-        assertThat(ids(emittedAssets()), contains(GROUP_ID + "." + SCHEMA, "analytics.salesforce.account"));
+        assertThat(assetManagerFactory.allEmitted(), hasSize(0));
     }
 
     @Test

@@ -48,6 +48,12 @@
 - Provides plugin components under `io.kestra.plugin.fivetran`.
 - Includes classes such as `Sync`, `Status`, `SyncResponse`, `ConnectorStatusResponse`, `ConnectorResponse`.
 
+## UI
+
+On Kestra 2.0+, `connectors.Sync` and `connectors.Status` get a card under the node in the topology view (task settings before a run, sync state, freshness, alerts and table counts after) and a "Show Details" action that opens a per-connector dialog. Both only read the task run's outputs; they make no call to Fivetran. The source is in [`ui/`](ui/README.md). Requires Kestra 2.0.x.
+
+Building the plugin runs the UI build, which needs Node.js 18 or later.
+
 ## Documentation
 * Full documentation can be found under [kestra.io/docs](https://kestra.io/docs)
 * Documentation for developing a plugin is included in the [Plugin Developer Guide](https://kestra.io/docs/plugin-developer-guide/).
