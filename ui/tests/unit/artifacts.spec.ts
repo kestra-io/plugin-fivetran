@@ -171,3 +171,19 @@ describe("ConnectorsArtifact", () => {
         expect(wrapper.text()).toContain("Run the flow");
     });
 });
+describe("TablesArtifact state filter", () => {
+    test("shows 'All tables' by default and sends no enabled filter", async () => {
+        const fetchEndpoint = vi.fn(async () => page([row()]));
+        const wrapper = mountTables({
+            task: syncTask,
+            execution,
+            fetchOutputs: async () => syncWaitedOutputs,
+            fetchEndpoint,
+        });
+        await flushPromises();
+
+        // An empty value made the select show its placeholder instead of the selected option.
+        expect(wrapper.find(".fivetran-tables__state").text()).toContain("All tables");
+        expect(fetchEndpoint.mock.calls[0][1]).not.toHaveProperty("enabled");
+    });
+});

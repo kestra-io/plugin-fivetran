@@ -30,7 +30,7 @@ describe("AssetFreshnessFooter", () => {
             syncState: "scheduled",
         });
 
-        expect(wrapper.find(".fivetran-footer__text").text()).toBe("Fivetran sync 2 h ago");
+        expect(wrapper.find(".fivetran-footer__text").text()).toBe("Synced 2 h ago");
         expect(wrapper.find(".fivetran-footer__state").text()).toBe("· scheduled");
     });
 

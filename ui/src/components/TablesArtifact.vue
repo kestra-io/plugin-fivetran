@@ -79,14 +79,15 @@ const selectedConnector = computed(() => connectorId.value ?? connectorOptions.v
 const query = ref("");
 // The text is applied on Enter or blur, so typing does not call the endpoint on every keystroke.
 const draft = ref("");
-const state = ref<"" | "true" | "false">("");
+// "all" rather than "": the select treats an empty value as no selection and shows its placeholder.
+const state = ref<"all" | "true" | "false">("all");
 const page = ref(1);
 const resetPage = () => (page.value = 1);
 
 const { data, status } = useEndpoint<TablesPage>(props, "tables", () => ({
     connectorId: isStatusOutput.value ? selectedConnector.value : undefined,
     q: query.value,
-    enabled: state.value,
+    enabled: state.value === "all" ? undefined : state.value,
     page: page.value,
     size: PAGE_SIZE,
 }));
@@ -109,7 +110,7 @@ const rows = computed(() =>
         };
     }),
 );
-const filtered = computed(() => !!query.value || !!state.value);
+const filtered = computed(() => !!query.value || state.value !== "all");
 </script>
 
 <template>
@@ -142,7 +143,7 @@ const filtered = computed(() => !!query.value || !!state.value);
                 :aria-label="t('state')"
                 @change="resetPage"
             >
-                <KsOption :label="t('all')" value="" />
+                <KsOption :label="t('all')" value="all" />
                 <KsOption :label="t('synced')" value="true" />
                 <KsOption :label="t('notSynced')" value="false" />
             </KsSelect>

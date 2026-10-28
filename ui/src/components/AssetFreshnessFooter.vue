@@ -9,7 +9,7 @@ const { t } = useI18n({
     useScope: "local",
     messages: {
         en: {
-            synced: "Fivetran sync {ago}",
+            synced: "Synced {ago}",
             title: "Last successful Fivetran sync: {date}",
         },
     },
