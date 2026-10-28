@@ -502,8 +502,8 @@ class SyncRetryTest {
     }
 
     @Test
-    @DisplayName("Should ignore options.retry so core's HTTP retry does not multiply maxAttempts")
-    void optionsRetryDoesNotStackOnMaxAttempts(WireMockRuntimeInfo wmRuntimeInfo) {
+    @DisplayName("Should use options.retry as the plugin retry policy without stacking core's HTTP retry on it")
+    void optionsRetryDrivesTheAttemptCount(WireMockRuntimeInfo wmRuntimeInfo) {
         stubFor(get(urlEqualTo("/v2/connectors/" + CONNECTOR_ID)).willReturn(aResponse().withStatus(503)));
 
         // The HTTP library below core retries a 503 once on its own, so compare with the same task without
@@ -513,12 +513,14 @@ class SyncRetryTest {
         resetAllRequests();
 
         var options = HttpConfiguration.builder()
-            .retry(Exponential.builder().interval(Duration.ofMillis(10)).maxInterval(Duration.ofMillis(50)).maxAttempts(5).build())
+            .retry(Exponential.builder().interval(Duration.ofMillis(10)).maxInterval(Duration.ofMillis(50)).maxAttempts(3).build())
             .build();
         assertThrows(HttpClientResponseException.class, () -> retryTask(wmRuntimeInfo.getHttpBaseUrl(), options).run(runContext()));
 
-        // With core's retry left on, each of the 2 attempts would itself be retried 5 times.
-        verify(exactly(withoutOptions), getRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID)));
+        // The task's maxAttempts (2) is replaced by options.retry (3), and core's retry is not stacked on top of
+        // it: each attempt costs the same number of requests as without options.
+        var perAttempt = withoutOptions / 2;
+        verify(exactly(perAttempt * 3), getRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID)));
     }
 
     private static Sync retryTask(String baseUrl, HttpConfiguration options) {

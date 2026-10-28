@@ -162,7 +162,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
 
     @Schema(
         title = "Wait for sync completion",
-        description = "When true (default), poll the connector until the sync finishes to capture status and logs. Set to false to return once the sync has been triggered, without waiting for it. `succeededAt` is then null, since the sync is still running on Fivetran. No assets are emitted in that case, since the sync has not finished. To record lineage after the sync, add a downstream `io.kestra.plugin.fivetran.connectors.Status` task with `assets.enableAuto`. If the task run is interrupted while waiting (the worker is lost, or `maxDuration` is reached and the task is retried), the next attempt resumes polling the sync it triggered instead of triggering another one."
+        description = "When true (default), poll the connector until the sync finishes to capture status and logs. Set to false to return once the sync has been triggered, without waiting for it. `succeededAt` is then null, since the sync is still running on Fivetran. No assets are emitted in that case, since the sync has not finished. To record lineage after the sync, add a downstream `io.kestra.plugin.fivetran.connectors.Status` task with `assets.enableAuto`. If the task run is interrupted while waiting (the worker is lost, or `maxDuration` is reached and the task is retried), the next attempt resumes polling the sync it triggered instead of triggering another one. Only a sync triggered less than twice `maxDuration` ago is resumed: a restart of the execution long after triggers a new sync. A paused connector fails right away, unless the resumed sync already completed."
     )
     @Builder.Default
     Property<Boolean> wait = Property.ofValue(true);
@@ -233,9 +233,6 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         }
 
         Connector previousConnector = fetchConnector(runContext);
-        if (Boolean.TRUE.equals(previousConnector.getPaused())) {
-            throw pausedConnector(connectorId);
-        }
 
         var rForce = runContext.render(this.force).as(Boolean.class).orElseThrow();
         var rReattach = runContext.render(this.reattach).as(Boolean.class).orElse(false);
@@ -244,9 +241,15 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         }
 
         var rWait = runContext.render(this.wait).as(Boolean.class).orElseThrow();
+        Duration rMaxDuration = runContext.render(this.maxDuration).as(Duration.class).orElseThrow();
         // A sync this task run triggered before it was interrupted (worker lost, maxDuration hit): resume polling it
         // instead of triggering a second one. With `wait: false` there is nothing to resume.
-        var resumed = rWait ? readCheckpoint(runContext) : Optional.<SyncCheckpoint> empty();
+        var resumed = rWait ? readCheckpoint(runContext, rMaxDuration, Instant.now()) : Optional.<SyncCheckpoint> empty();
+
+        // A resumed sync may have finished before the connector was paused, so polling decides there.
+        if (resumed.isEmpty() && Boolean.TRUE.equals(previousConnector.getPaused())) {
+            throw pausedConnector(connectorId);
+        }
 
         boolean reattached;
         boolean queuedBehindRunning;
@@ -303,7 +306,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             }
 
             if (rWait) {
-                writeCheckpoint(runContext, SyncCheckpoint.triggered(previousCompletedDate, queuedBehindRunning, reattached));
+                writeCheckpoint(runContext, SyncCheckpoint.triggered(previousCompletedDate, queuedBehindRunning, reattached, Instant.now()));
             }
         }
 
@@ -315,7 +318,6 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             return withBreakdown(runContext, connectorId, previousConnector, ConnectorFreshness.from(previousConnector, null), outputBuilder, false);
         }
 
-        Duration rMaxDuration = runContext.render(this.maxDuration).as(Duration.class).orElseThrow();
         var completion = new CompletionWatch(connectorId, previousCompletedDate, queuedBehindRunning, COMPLETION_GRACE, Instant::now, logger);
         AtomicReference<Exception> lastTransientError = new AtomicReference<>();
         Connector finalConnector;
@@ -336,7 +338,12 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
                         throw e;
                     }
 
-                    return completion.accept(current);
+                    var accepted = completion.accept(current);
+                    // A paused connector starts no sync, so a resumed run that saw no completion would only time out.
+                    if (accepted == null && resumed.isPresent() && Boolean.TRUE.equals(current.getPaused())) {
+                        throw pausedConnector(connectorId);
+                    }
+                    return accepted;
                 }),
                 rPollFrequency,
                 rMaxDuration
@@ -390,33 +397,41 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
     /**
      * What a task run needs to resume polling the sync it started, saved once the sync is triggered and marked
      * {@code done} once polling sees it end. Checkpoints are scoped to the task run, which keeps its id when a lost
-     * worker's task is resubmitted and across {@code retry} attempts.
+     * worker's task is resubmitted, across {@code retry} attempts and across a manual restart of the execution.
      *
      * @param baseline the connector's completion date before the trigger, as ISO-8601, null if it never completed
+     * @param triggeredAt when the sync was triggered, as ISO-8601; null on checkpoints saved before it was recorded
      */
-    record SyncCheckpoint(String state, String baseline, boolean queuedBehindRunning, boolean reattached) {
+    record SyncCheckpoint(String state, String baseline, boolean queuedBehindRunning, boolean reattached, String triggeredAt) {
 
         static final String TRIGGERED = "triggered";
         static final String DONE = "done";
 
-        static SyncCheckpoint triggered(ZonedDateTime baseline, boolean queuedBehindRunning, boolean reattached) {
-            return new SyncCheckpoint(TRIGGERED, baseline != null ? baseline.toString() : null, queuedBehindRunning, reattached);
+        static SyncCheckpoint triggered(ZonedDateTime baseline, boolean queuedBehindRunning, boolean reattached, Instant triggeredAt) {
+            return new SyncCheckpoint(TRIGGERED, baseline != null ? baseline.toString() : null, queuedBehindRunning, reattached, triggeredAt.toString());
         }
 
         static SyncCheckpoint done() {
-            return new SyncCheckpoint(DONE, null, false, false);
+            return new SyncCheckpoint(DONE, null, false, false, null);
         }
 
         ZonedDateTime baselineDate() {
             return baseline != null ? ZonedDateTime.parse(baseline) : null;
+        }
+
+        Instant triggeredInstant() {
+            return triggeredAt != null ? Instant.parse(triggeredAt) : null;
         }
     }
 
     /**
      * The sync to resume, empty when this task run has none in flight. Checkpoints only make resuming possible, so
      * a store that cannot be read, or a value that cannot be parsed, is logged and the task triggers a sync as usual.
+     * A checkpoint older than twice {@code maxDuration} (or with no trigger time) is stale: a {@code retry} right
+     * after a timeout is well within that and keeps waiting on the running sync, whereas a restart long after must
+     * not judge an unrelated later sync against an old baseline.
      */
-    static Optional<SyncCheckpoint> readCheckpoint(RunContext runContext) {
+    static Optional<SyncCheckpoint> readCheckpoint(RunContext runContext, Duration maxDuration, Instant now) {
         try {
             var checkpoints = runContext.checkpoints();
             if (checkpoints == null) {
@@ -427,7 +442,25 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
                 return Optional.empty();
             }
             var checkpoint = JacksonMapper.ofJson().readValue(value.get(), SyncCheckpoint.class);
-            return SyncCheckpoint.TRIGGERED.equals(checkpoint.state()) ? Optional.of(checkpoint) : Optional.empty();
+            if (!SyncCheckpoint.TRIGGERED.equals(checkpoint.state())) {
+                return Optional.empty();
+            }
+
+            var triggeredAt = checkpoint.triggeredInstant();
+            if (triggeredAt == null) {
+                runContext.logger().warn("The saved sync checkpoint has no trigger time, so it is ignored and a new sync is triggered");
+                return Optional.empty();
+            }
+            var maxAge = maxDuration.multipliedBy(2);
+            if (triggeredAt.isBefore(now.minus(maxAge))) {
+                runContext.logger().warn(
+                    "The saved sync checkpoint was taken at {}, more than twice maxDuration ({}) ago, so it is ignored and a new sync is triggered",
+                    triggeredAt,
+                    maxDuration
+                );
+                return Optional.empty();
+            }
+            return Optional.of(checkpoint);
         } catch (Exception e) {
             runContext.logger().warn("Could not read the sync checkpoint, a new sync is triggered: {}", e.getMessage());
             return Optional.empty();

@@ -1,6 +1,8 @@
 package io.kestra.plugin.fivetran.connectors;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZonedDateTime;
 import java.util.Map;
 import java.util.concurrent.TimeoutException;
 
@@ -157,12 +159,102 @@ class SyncCheckpointTest {
         // A run context with no task run: the store has nothing to key the checkpoint on.
         Sync task = syncTask(wmRuntimeInfo, true);
         RunContext runContext = runContextFactory.of(Map.of());
-        assertTrue(Sync.readCheckpoint(runContext).isEmpty());
+        assertTrue(Sync.readCheckpoint(runContext, Duration.ofMinutes(1), Instant.now()).isEmpty());
         Sync.writeCheckpoint(runContext, Sync.SyncCheckpoint.done());
 
         stubConnector(connectorBody(CONNECTOR_ID, AFTER, null, "scheduled"));
         assertThrows(TimeoutException.class, () -> task.run(runContext));
         verify(exactly(1), postRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync")));
+    }
+
+    @Test
+    @DisplayName("Should trigger a new sync when the checkpoint is older than twice maxDuration")
+    void staleCheckpointIsDiscarded(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubTrigger();
+        stubConnector(connectorBody(CONNECTOR_ID, BEFORE, null, "scheduled"));
+
+        Sync task = syncTask(wmRuntimeInfo, true);
+        RunContext runContext = runContext(task);
+        // maxDuration is 400ms: a sync triggered an hour ago is far past twice that.
+        Sync.writeCheckpoint(runContext, Sync.SyncCheckpoint.triggered(ZonedDateTime.parse(BEFORE), false, false, Instant.now().minus(Duration.ofHours(1))));
+
+        assertThrows(TimeoutException.class, () -> task.run(runContext));
+        verify(exactly(1), postRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync")));
+    }
+
+    @Test
+    @DisplayName("Should resume a checkpoint taken within twice maxDuration")
+    void recentCheckpointIsResumed(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubTrigger();
+        stubConnector(connectorBody(CONNECTOR_ID, AFTER, null, "scheduled"));
+
+        Sync task = syncTask(wmRuntimeInfo, true);
+        RunContext runContext = runContext(task);
+        // 600ms old with a 400ms maxDuration: past maxDuration, inside the 800ms window.
+        Sync.writeCheckpoint(runContext, Sync.SyncCheckpoint.triggered(ZonedDateTime.parse(BEFORE), false, false, Instant.now().minusMillis(600)));
+
+        assertNotNull(task.run(runContext).getSucceededAt());
+        verify(exactly(0), postRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync")));
+    }
+
+    @Test
+    @DisplayName("Should ignore a triggered checkpoint saved without a trigger time")
+    void checkpointWithoutTriggerTimeIsDiscarded(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubTrigger();
+        stubConnector(connectorBody(CONNECTOR_ID, BEFORE, null, "scheduled"));
+
+        Sync task = syncTask(wmRuntimeInfo, true);
+        RunContext runContext = runContext(task);
+        runContext.checkpoints().set(Sync.CHECKPOINT_KEY, "{\"state\":\"triggered\",\"baseline\":\"" + BEFORE + "\",\"queuedBehindRunning\":false,\"reattached\":false}");
+
+        assertThrows(TimeoutException.class, () -> task.run(runContext));
+        verify(exactly(1), postRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync")));
+    }
+
+    @Test
+    @DisplayName("Should accept a resumed sync that completed before the connector was paused")
+    void resumedSyncCompletedBeforePauseSucceeds(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubTrigger();
+        stubConnector(pausedBody(AFTER));
+
+        Sync task = syncTask(wmRuntimeInfo, true);
+        RunContext runContext = runContext(task);
+        Sync.writeCheckpoint(runContext, Sync.SyncCheckpoint.triggered(ZonedDateTime.parse(BEFORE), false, false, Instant.now()));
+
+        assertNotNull(task.run(runContext).getSucceededAt());
+        verify(exactly(0), postRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync")));
+    }
+
+    @Test
+    @DisplayName("Should fail fast with the paused error when a resumed sync has no completion on a paused connector")
+    void resumedPausedConnectorWithoutCompletionFailsFast(WireMockRuntimeInfo wmRuntimeInfo) throws Exception {
+        stubTrigger();
+        stubConnector(pausedBody(BEFORE));
+
+        Sync task = Sync.builder()
+            .id("sync")
+            .type(Sync.class.getName())
+            .apiKey(Property.ofValue("dummy-api-key"))
+            .apiSecret(Property.ofValue("dummy-api-secret"))
+            .connectorId(Property.ofValue(CONNECTOR_ID))
+            .baseUrl(Property.ofValue(wmRuntimeInfo.getHttpBaseUrl()))
+            .maxDuration(Property.ofValue(Duration.ofSeconds(30)))
+            .pollFrequency(Property.ofValue(Duration.ofMillis(50)))
+            .maxAttempts(Property.ofValue(1))
+            .build();
+        RunContext runContext = runContext(task);
+        Sync.writeCheckpoint(runContext, Sync.SyncCheckpoint.triggered(ZonedDateTime.parse(BEFORE), false, false, Instant.now()));
+
+        var start = Instant.now();
+        var thrown = assertThrows(IllegalStateException.class, () -> task.run(runContext));
+
+        assertTrue(thrown.getMessage().contains("is paused"), "message was: " + thrown.getMessage());
+        assertTrue(Duration.between(start, Instant.now()).compareTo(Duration.ofSeconds(10)) < 0, "must not wait until maxDuration");
+        verify(exactly(0), postRequestedFor(urlEqualTo("/v2/connectors/" + CONNECTOR_ID + "/sync")));
+    }
+
+    private static String pausedBody(String succeededAt) {
+        return connectorBody(CONNECTOR_ID, succeededAt, null, "paused").replace("\"paused\": false", "\"paused\": true");
     }
 
     private static Sync.SyncCheckpoint checkpoint(RunContext runContext) throws Exception {
