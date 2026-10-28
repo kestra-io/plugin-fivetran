@@ -174,4 +174,30 @@ class TablesTest {
             assertThat(json.get("results").size(), is(0));
         }
     }
+
+    @Test
+    void with_a_known_count_and_no_filter_pages_without_reading_the_rest_of_the_file() throws Exception {
+        var rows = breakdown();
+        var trailing = "not ion {".getBytes();
+        var file = new byte[rows.length + trailing.length];
+        System.arraycopy(rows, 0, file, 0, rows.length);
+        System.arraycopy(trailing, 0, file, rows.length, trailing.length);
+        var context = syncContext().output("tableCount", 3).file(SYNC_URI, file).param("size", "1").param("page", "2");
+
+        var json = StubEndpointContext.json(new Tables().handle(context));
+
+        // Only the page is deserialized: the unreadable tail, past it, is never reached.
+        assertThat(tables(json), contains("Opportunity"));
+        assertThat(json.get("total").asLong(), is(3L));
+        assertThat(json.get("tableCount").asLong(), is(3L));
+    }
+
+    @Test
+    void with_a_known_count_a_filter_still_counts_the_matching_rows() throws Exception {
+        var json = StubEndpointContext.json(new Tables().handle(syncContext().output("tableCount", 3).param("enabled", "false")));
+
+        assertThat(tables(json), contains("Opportunity", "contact"));
+        assertThat(json.get("total").asLong(), is(2L));
+        assertThat(json.get("tableCount").asLong(), is(3L));
+    }
 }

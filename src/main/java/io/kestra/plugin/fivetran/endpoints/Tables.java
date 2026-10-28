@@ -58,9 +58,23 @@ public class Tables implements PluginEndpoint {
         var results = new ArrayList<Map<String, Object>>();
         long[] counts = new long[2]; // [rows in the file, rows matching the filters]
 
-        open(context).ifPresent(input ->
+        open(context).ifPresent(file ->
         {
-            try (input) {
+            try (var input = file.input()) {
+                if (needle.isEmpty() && enabled == null && file.tableCount() != null) {
+                    // No filter: the page is a plain slice and the total is already known, so skip the rows before
+                    // it without deserializing them and stop once the page is filled.
+                    FileSerde.read(input, skip, size, row ->
+                    {
+                        if (row instanceof Map<?, ?> map) {
+                            results.add(allowListed(map));
+                        }
+                    });
+                    counts[0] = file.tableCount();
+                    counts[1] = file.tableCount();
+                    return;
+                }
+
                 FileSerde.read(input, row ->
                 {
                     if (!(row instanceof Map<?, ?> map)) {
@@ -87,41 +101,50 @@ public class Tables implements PluginEndpoint {
     }
 
     /**
+     * The breakdown file to read and the row count its task run reported, if any.
+     */
+    record BreakdownFile(InputStream input, Long tableCount) {
+    }
+
+    /**
      * Opens the breakdown file of the requested connector, empty when the task run is not a Fivetran one, the
      * output is missing, or the file does not exist. The scoped storage rejects any URI outside the execution,
      * which is treated the same as a missing file.
      */
-    static Optional<InputStream> open(PluginEndpointContext context) {
+    static Optional<BreakdownFile> open(PluginEndpointContext context) {
         var outputs = context.outputs().get();
         if (outputs == null) {
             return Optional.empty();
         }
 
-        var tables = tablesUri(outputs, context.param("connectorId"));
-        if (tables == null) {
+        var located = locate(outputs, context.param("connectorId"));
+        if (located == null) {
             return Optional.empty();
         }
 
         try {
-            var uri = URI.create(tables);
+            var uri = URI.create(located.uri());
             if (!context.storage().exists(uri)) {
                 return Optional.empty();
             }
-            return Optional.of(context.storage().getFile(uri));
+            return Optional.of(new BreakdownFile(context.storage().getFile(uri), located.tableCount()));
         } catch (IllegalArgumentException | IOException e) {
             return Optional.empty();
         }
     }
 
+    private record Located(String uri, Long tableCount) {
+    }
+
     /**
-     * The {@code tables} output of a Fivetran task run: on {@code Sync} the top-level one (its outputs carry
+     * The {@code tables} and {@code tableCount} outputs of a Fivetran task run: on {@code Sync} the top-level one (its outputs carry
      * {@code connectorId} and the {@code freshness} summary), on {@code Status} the one of the requested connector
      * in {@code connectors} (each entry carries its {@code id}). Other task runs of the execution return null, so
      * the endpoint cannot be used to read their files.
      */
-    private static String tablesUri(Map<String, Object> outputs, String connectorId) {
+    private static Located locate(Map<String, Object> outputs, String connectorId) {
         if (outputs.get("connectorId") instanceof String && outputs.get("freshness") instanceof Map<?, ?>) {
-            return text(outputs.get("tables"));
+            return located(outputs);
         }
 
         if (outputs.get("connectors") instanceof Map<?, ?> connectors && !connectors.isEmpty()) {
@@ -129,11 +152,20 @@ public class Tables implements PluginEndpoint {
                 ? connectors.values().iterator().next()
                 : connectors.get(connectorId.strip());
             if (state instanceof Map<?, ?> connector && connector.get("id") instanceof String) {
-                return text(connector.get("tables"));
+                return located(connector);
             }
         }
 
         return null;
+    }
+
+    private static Located located(Map<?, ?> source) {
+        var uri = text(source.get("tables"));
+        if (uri == null) {
+            return null;
+        }
+        var count = source.get("tableCount") instanceof Number number && number.longValue() >= 0 ? number.longValue() : null;
+        return new Located(uri, count);
     }
 
     private static boolean matches(Map<?, ?> row, String needle, Boolean enabled) {
