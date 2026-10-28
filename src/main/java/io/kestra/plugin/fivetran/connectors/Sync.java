@@ -286,7 +286,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         ZonedDateTime previousCompletedDate = previousConnector.completedDate();
         Duration rMaxDuration = runContext.render(this.maxDuration).as(Duration.class).orElseThrow();
         var queuedBehindRunning = wasSyncing && !reattached && !rForce && !staleSync;
-        var completion = new CompletionWatch(previousCompletedDate, queuedBehindRunning, COMPLETION_GRACE, Instant::now);
+        var completion = new CompletionWatch(connectorId, previousCompletedDate, queuedBehindRunning, COMPLETION_GRACE, Instant::now, logger);
         AtomicReference<Exception> lastTransientError = new AtomicReference<>();
         Connector finalConnector;
         try {
@@ -440,11 +440,15 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         private final boolean queuedBehindRunning;
         private final Duration grace;
         private final Supplier<Instant> clock;
+        private final String connectorId;
+        private final Logger logger;
         private ZonedDateTime earlierSyncCompletion;
         private Connector candidate;
         private Instant candidateSince;
 
-        CompletionWatch(ZonedDateTime baseline, boolean queuedBehindRunning, Duration grace, Supplier<Instant> clock) {
+        CompletionWatch(String connectorId, ZonedDateTime baseline, boolean queuedBehindRunning, Duration grace, Supplier<Instant> clock, Logger logger) {
+            this.connectorId = connectorId;
+            this.logger = logger;
             this.baseline = baseline;
             this.queuedBehindRunning = queuedBehindRunning;
             this.grace = grace;
@@ -475,8 +479,24 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
             candidate = current;
             if (candidateSince == null) {
                 candidateSince = clock.get();
+                // Logged once per hold, so the case stays visible without one line per poll.
+                logger.debug(
+                    "Connector '{}' reports a completion at {} but is still syncing, waiting up to {} for the sync to end",
+                    connectorId,
+                    completedDate,
+                    grace
+                );
             }
-            return Duration.between(candidateSince, clock.get()).compareTo(grace) >= 0 ? current : null;
+            if (Duration.between(candidateSince, clock.get()).compareTo(grace) < 0) {
+                return null;
+            }
+            logger.debug(
+                "Connector '{}' is still syncing {} after reporting a completion at {}, accepting that completion",
+                connectorId,
+                grace,
+                completedDate
+            );
+            return current;
         }
 
         /** The latest completion seen while Fivetran still reported syncing, if any. */

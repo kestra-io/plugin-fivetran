@@ -1,15 +1,22 @@
 package io.kestra.plugin.fivetran.connectors;
 
+import java.lang.reflect.Proxy;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.Test;
+import org.slf4j.Logger;
+import org.slf4j.helpers.MessageFormatter;
 
 import io.kestra.plugin.fivetran.models.Connector;
 import io.kestra.plugin.fivetran.models.ConnectorStatusResponse;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -21,9 +28,23 @@ class CompletionWatchTest {
     private static final Duration GRACE = Duration.ofMinutes(1);
 
     private final AtomicReference<Instant> now = new AtomicReference<>(Instant.parse("2026-10-28T09:14:05Z"));
+    private final List<String> debugLines = new ArrayList<>();
+    private final Logger logger = (Logger) Proxy.newProxyInstance(
+        Logger.class.getClassLoader(),
+        new Class<?>[] { Logger.class },
+        (proxy, method, args) ->
+        {
+            if (method.getName().equals("debug") && args != null && args[0] instanceof String message) {
+                // debug(String, Object...) passes its arguments as one array.
+                var arguments = args.length == 2 && args[1] instanceof Object[] array ? array : Arrays.copyOfRange(args, 1, args.length);
+                debugLines.add(MessageFormatter.arrayFormat(message, arguments).getMessage());
+            }
+            return method.getReturnType() == boolean.class ? false : null;
+        }
+    );
 
     private Sync.CompletionWatch watch(boolean queued) {
-        return new Sync.CompletionWatch(BEFORE, queued, GRACE, now::get);
+        return new Sync.CompletionWatch("my_connector", BEFORE, queued, GRACE, now::get, logger);
     }
 
     private static Connector connector(ZonedDateTime succeededAt, String syncState) {
@@ -66,6 +87,11 @@ class CompletionWatchTest {
         now.set(now.get().plusSeconds(1));
         // The next sync keeps the connector syncing: the task returns after the grace period, not at maxDuration.
         assertSame(syncing, watch.accept(syncing));
+
+        // One line when the hold starts, one when it gives up: none per poll in between.
+        assertEquals(2, debugLines.size(), debugLines.toString());
+        assertTrue(debugLines.get(0).contains("'my_connector' reports a completion at " + FIRST + " but is still syncing"), debugLines.get(0));
+        assertTrue(debugLines.get(1).contains("is still syncing PT1M after reporting a completion"), debugLines.get(1));
     }
 
     @Test
