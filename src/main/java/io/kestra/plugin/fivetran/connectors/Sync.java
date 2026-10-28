@@ -279,7 +279,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         runContext.metric(Counter.of("reattached", reattached ? 1 : 0));
 
         if (!runContext.render(this.wait).as(Boolean.class).orElseThrow()) {
-            var outputBuilder = Output.builder().connectorId(connectorId).reattached(reattached);
+            var outputBuilder = Output.builder().connectorId(connectorId).reattached(reattached).build();
             return withBreakdown(runContext, connectorId, previousConnector, ConnectorFreshness.from(previousConnector, null), outputBuilder, false);
         }
 
@@ -348,7 +348,8 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         var outputBuilder = Output.builder()
             .connectorId(connectorId)
             .succeededAt(finalConnector.getSucceededAt())
-            .reattached(reattached);
+            .reattached(reattached)
+            .build();
         return withBreakdown(runContext, connectorId, finalConnector, ConnectorFreshness.from(finalConnector, true), outputBuilder, true);
     }
 
@@ -358,8 +359,9 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         String connectorId,
         Connector connector,
         ConnectorFreshness freshness,
-        Output.OutputBuilder outputBuilder,
+        Output base,
         boolean emitAssets) throws IOException {
+        var outputBuilder = base.toBuilder();
         var schemas = readSchemas(runContext, connectorId);
 
         // With `wait: false` the connector is the pre-trigger snapshot, which describes no finished sync.
@@ -520,7 +522,7 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
         return this.fetchConnector(runContext, connectorId);
     }
 
-    @Builder
+    @Builder(toBuilder = true)
     @Getter
     public static class Output implements io.kestra.core.models.tasks.Output {
         @Schema(
