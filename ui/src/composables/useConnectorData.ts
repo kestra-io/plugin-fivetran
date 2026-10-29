@@ -49,16 +49,22 @@ function fromState(state: Record<string, any>, fallbackId?: string): ConnectorVi
     };
 }
 
-// Uses the host's lazy fetcher, never its own HTTP call; the `tables` file is never read.
+// The current task run of a task: a looped or restarted task has several, the last one is shown.
+export function latestTaskRun(
+    execution: unknown,
+    taskId: unknown,
+): Record<string, any> | undefined {
+    const list = (execution as { taskRunList?: any[] } | undefined)?.taskRunList;
+    return list?.filter((run: any) => run.taskId === taskId).at(-1);
+}
+
+// Uses the host's lazy fetcher, never its own HTTP call; the `tables` file is only read through the plugin endpoint.
 export function useConnectorData(props: SlotProps) {
     const taskId = computed(() => props.task?.id as string | undefined);
     const hasExecution = computed(() => !!props.execution?.id);
     const executionId = computed(() => props.execution?.id as string | undefined);
 
-    const taskRun = computed(() => {
-        const list = props.execution?.taskRunList as any[] | undefined;
-        return list?.filter((run: any) => run.taskId === taskId.value).at(-1);
-    });
+    const taskRun = computed(() => latestTaskRun(props.execution, taskId.value));
 
     const outputs = ref<Record<string, any> | null>(null);
 
@@ -122,6 +128,7 @@ export function useConnectorData(props: SlotProps) {
     });
 
     return {
+        taskRun,
         taskRunState,
         isTerminal,
         hasExecution,

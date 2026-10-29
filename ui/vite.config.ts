@@ -4,13 +4,32 @@ import { mergeConfig } from "vite";
 // Node base (56) + ~31.5px per row: 3/4 settings rows before a run, 5 rows with an execution.
 const HEIGHT_WITH_EXECUTION = 214;
 const TASKS = [
-    { type: "connectors.Sync", height: 150 },
-    { type: "connectors.Status", height: 182 },
+    { type: "connectors.Sync", height: 150, artifacts: ["tables"] },
+    { type: "connectors.Status", height: 182, artifacts: ["connectors", "tables"] },
 ];
+
+// One entry per view in the execution Artifacts tab. "tables" reads the plugin's `tables` endpoint, "connectors"
+// only the task run's outputs.
+const ARTIFACTS: Record<string, { path: string; title: string; description: string }> = {
+    connectors: {
+        path: "./src/components/ConnectorsArtifact.vue",
+        title: "Connectors",
+        description: "State, freshness, alerts and table counts of every connector.",
+    },
+    tables: {
+        path: "./src/components/TablesArtifact.vue",
+        title: "Tables",
+        description: "The schemas and tables the connector writes to the destination.",
+    },
+};
+
+// One line under each asset card in the dependencies graph. The graph reserves it on every card, so it is kept to a
+// single line of extra-small text.
+const ASSET_FOOTER_HEIGHT = 20;
 
 // A customAction with no property to show makes the host open a dialog rendering the topology-task-modal slot.
 const exposes = Object.fromEntries(
-    TASKS.map(({ type, height }) => [
+    TASKS.map(({ type, height, artifacts }) => [
         type,
         [
             {
@@ -26,6 +45,22 @@ const exposes = Object.fromEntries(
                 slotName: "topology-task-modal",
                 path: "./src/components/ConnectorDetails.vue",
             },
+            // Both tasks emit the table and connector assets, so both ship the footer of their cards. Safe: the host
+            // renders one footer per asset card, resolved by the task type that produced it (AssetNode.vue), and
+            // reserves the largest footerHeight once for the whole graph.
+            {
+                slotName: "asset-card-footer",
+                path: "./src/components/AssetFreshnessFooter.vue",
+                additionalProperties: { footerHeight: ASSET_FOOTER_HEIGHT },
+            },
+            ...artifacts.map((id) => ({
+                slotName: `execution-artifact/${id}`,
+                path: ARTIFACTS[id].path,
+                additionalProperties: {
+                    title: ARTIFACTS[id].title,
+                    description: ARTIFACTS[id].description,
+                },
+            })),
         ],
     ]),
 );

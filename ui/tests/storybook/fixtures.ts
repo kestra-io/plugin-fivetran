@@ -16,8 +16,18 @@ export const execution = {
     flowId: "fivetran-sync",
     state: { current: "SUCCESS", startDate: "2024-01-15T10:00:00Z" } as any,
     taskRunList: [
-        { id: "tr-sync", taskId: "sync", executionId: "exec-abc123" },
-        { id: "tr-status", taskId: "status", executionId: "exec-abc123" },
+        {
+            id: "tr-sync",
+            taskId: "sync",
+            executionId: "exec-abc123",
+            state: { current: "SUCCESS" },
+        },
+        {
+            id: "tr-status",
+            taskId: "status",
+            executionId: "exec-abc123",
+            state: { current: "SUCCESS" },
+        },
     ],
 } as any;
 

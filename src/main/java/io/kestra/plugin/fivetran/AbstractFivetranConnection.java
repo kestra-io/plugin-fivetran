@@ -34,6 +34,7 @@ import io.kestra.core.http.client.configurations.HttpConfiguration;
 import io.kestra.core.models.annotations.PluginProperty;
 import io.kestra.core.models.assets.Asset;
 import io.kestra.core.models.assets.AssetIdentifier;
+import io.kestra.core.models.assets.AssetRelationRef;
 import io.kestra.core.models.assets.AssetsDeclaration;
 import io.kestra.core.models.assets.Custom;
 import io.kestra.core.models.assets.External;
@@ -41,6 +42,7 @@ import io.kestra.core.models.flows.State;
 import io.kestra.core.models.property.Property;
 import io.kestra.core.models.tasks.AssetFailureBehavior;
 import io.kestra.core.models.tasks.Task;
+import io.kestra.core.models.tasks.retrys.AbstractRetry;
 import io.kestra.core.models.tasks.retrys.Exponential;
 import io.kestra.core.runners.AssetEmit;
 import io.kestra.core.runners.RunContext;
@@ -126,14 +128,21 @@ public abstract class AbstractFivetranConnection extends Task {
 
     @Schema(
         title = "HTTP client options",
-        description = "Optional Kestra HTTP configuration (timeouts, proxy) applied to Fivetran calls. Retries are configured separately via `maxAttempts` and `initialRetryDelay`."
+        description = """
+            Optional Kestra HTTP configuration (timeouts, proxy) applied to Fivetran calls. Its `retry` policy, when \
+            set, replaces `maxAttempts` and `initialRetryDelay` as the plugin's retry policy; it is applied once by \
+            the plugin, never stacked with the HTTP client's own retry. Its `retryOnStatusCodes`, \
+            `retryOnStatusCodesByMethod` and `retryableTransportFailureMethods` fields are ignored: only read calls \
+            are retried, on a 429, a 5xx, a read timeout or a refused connection."""
     )
     @PluginProperty(group = "advanced")
     protected HttpConfiguration options;
 
     @Schema(
         title = "Maximum number of attempts on transient errors",
-        description = "Total attempts including the first call, not just retries. Default: 3."
+        description = """
+            Total attempts including the first call, not just retries. Default: 3. Ignored when `options.retry` is \
+            set, which then defines the retry policy."""
     )
     @Builder.Default
     @PluginProperty(group = "advanced")
@@ -141,7 +150,9 @@ public abstract class AbstractFivetranConnection extends Task {
 
     @Schema(
         title = "Initial delay before the first retry",
-        description = "Backoff grows from this delay, capped at 30 seconds. Default: 1 second."
+        description = """
+            Backoff grows from this delay, capped at 30 seconds. Default: 1 second. Ignored when `options.retry` is \
+            set, which then defines the retry policy."""
     )
     @Builder.Default
     @PluginProperty(group = "advanced")
@@ -165,28 +176,18 @@ public abstract class AbstractFivetranConnection extends Task {
         HttpConfiguration.HttpConfigurationBuilder builder = this.options != null ? this.options.toBuilder() : HttpConfiguration.builder();
 
         builder.auth(BasicAuthConfiguration.builder().username(apiKey).password(apiSecret).build());
+        // Retries are owned by the loop below. Core's own HTTP retry is turned off so a user-set `options.retry`
+        // cannot run inside it and multiply the attempts; that policy drives the loop instead.
+        var userRetry = this.options != null ? this.options.getRetry() : null;
+        builder.retry(Exponential.builder().interval(Duration.ofSeconds(1)).maxInterval(Duration.ofSeconds(30)).maxAttempts(1).build());
 
         HttpConfiguration httpConfiguration = builder.build();
 
-        var rMaxAttempts = runContext.render(this.maxAttempts).as(Integer.class).orElseThrow();
-        // @Min(1) only catches static values at flow-validation time; a dynamic expression can still
-        // render to 0 or negative, which Failsafe rejects with an opaque error naming no property.
-        if (rMaxAttempts < 1) {
-            throw new IllegalArgumentException("maxAttempts must be at least 1, but was " + rMaxAttempts);
-        }
-        Duration rInitialRetryDelay = runContext.render(this.initialRetryDelay).as(Duration.class).orElseThrow();
-        if (rInitialRetryDelay.isNegative() || rInitialRetryDelay.isZero()) {
-            throw new IllegalArgumentException("initialRetryDelay must be a positive duration, but was " + rInitialRetryDelay);
-        }
+        var retryPolicy = userRetry != null ? userRetry : defaultRetry(runContext);
 
         try (HttpClient client = new HttpClient(runContext, httpConfiguration)) {
             return RetryUtils.<HttpResponse<RES>, HttpClientException> of(
-                Exponential.builder()
-                    .delayFactor(2.0)
-                    .interval(rInitialRetryDelay)
-                    .maxInterval(Duration.ofSeconds(30))
-                    .maxAttempts(rMaxAttempts)
-                    .build(),
+                retryPolicy,
                 // On exhausted retries, surface the original error instead of RetryUtils' RetryFailed,
                 // so the task keeps the real HTTP status/cause and request()'s declared type stays honest.
                 failed -> failed.getCause() instanceof HttpClientException hce
@@ -209,6 +210,25 @@ public abstract class AbstractFivetranConnection extends Task {
         } catch (IOException e) {
             throw new RuntimeException("Error executing HTTP request", e);
         }
+    }
+
+    private AbstractRetry defaultRetry(RunContext runContext) throws IllegalVariableEvaluationException {
+        var rMaxAttempts = runContext.render(this.maxAttempts).as(Integer.class).orElseThrow();
+        // @Min(1) only catches static values at flow-validation time; a dynamic expression can still
+        // render to 0 or negative, which Failsafe rejects with an opaque error naming no property.
+        if (rMaxAttempts < 1) {
+            throw new IllegalArgumentException("maxAttempts must be at least 1, but was " + rMaxAttempts);
+        }
+        var rInitialRetryDelay = runContext.render(this.initialRetryDelay).as(Duration.class).orElseThrow();
+        if (rInitialRetryDelay.isNegative() || rInitialRetryDelay.isZero()) {
+            throw new IllegalArgumentException("initialRetryDelay must be a positive duration, but was " + rInitialRetryDelay);
+        }
+        return Exponential.builder()
+            .delayFactor(2.0)
+            .interval(rInitialRetryDelay)
+            .maxInterval(Duration.ofSeconds(30))
+            .maxAttempts(rMaxAttempts)
+            .build();
     }
 
     /**
@@ -510,9 +530,19 @@ public abstract class AbstractFivetranConnection extends Task {
             List<AssetEmit> emits;
             try {
                 emits = new ArrayList<>();
-                emits.add(new AssetEmit(List.of(), List.of(connectorAsset(connectorId, connector, syncState))));
+                var connectorAsset = connectorAsset(connectorId, connector, syncState);
+                // The connector asset goes first, so the parent its tables declare `partOf` already exists.
+                emits.add(new AssetEmit(List.of(), List.of(connectorAsset)));
                 emits.addAll(
-                    tableEmits(runContext, connectorId, connector, syncState, destinationByGroup, schemasByConnector.get(connectorId))
+                    tableEmits(
+                        runContext,
+                        connectorId,
+                        connector,
+                        syncState,
+                        connectorAsset.getId(),
+                        destinationByGroup,
+                        schemasByConnector.get(connectorId)
+                    )
                 );
             } catch (Exception e) {
                 failures.record(connectorId, "build the assets", e);
@@ -617,9 +647,8 @@ public abstract class AbstractFivetranConnection extends Task {
         metadata.put("system", ASSET_SYSTEM);
         metadata.put("connectorId", connectorId);
         metadata.put("schema", schema);
-        if (syncState != null) {
-            metadata.put("syncState", syncState);
-        }
+        putIfNotNull(metadata, "lastSyncedAt", connector.getSucceededAt() != null ? connector.getSucceededAt().toString() : null);
+        putIfNotNull(metadata, "syncState", syncState);
 
         return Custom.builder()
             .id(sanitizeAssetId(composeConnectorAssetId(connectorId, connector, schema)))
@@ -630,15 +659,17 @@ public abstract class AbstractFivetranConnection extends Task {
 
     /**
      * One emit per table the connector writes, id {@code database.schema.name}, with the source table as
-     * input. Returns empty rather than throwing when the database or the schema config is unavailable:
-     * lineage is metadata about the run, never the run itself, so a lineage read failure must not fail a
-     * sync that actually succeeded.
+     * input and the connector asset as {@code partOf}, so the dependencies graph groups a schema's tables.
+     * Returns empty rather than throwing when the database or the schema config is unavailable: lineage is
+     * metadata about the run, never the run itself, so a lineage read failure must not fail a sync that
+     * actually succeeded.
      */
     private List<AssetEmit> tableEmits(
         RunContext runContext,
         String connectorId,
         Connector connector,
         String syncState,
+        String connectorAssetId,
         Map<String, Destination> destinationByGroup,
         Map<String, ConnectorSchema> schemas) {
         Destination destination = resolveDestination(runContext, connector, destinationByGroup);
@@ -711,7 +742,8 @@ public abstract class AbstractFivetranConnection extends Task {
                     .id(sanitizeAssetId(joinSegments(database, schemaName, tableName)))
                     .type(TABLE_ASSET_TYPE)
                     .metadata(metadata)
-                    .build();
+                    .build()
+                    .withPartOf(new AssetRelationRef(connectorAssetId, null, null));
                 emits.add(new AssetEmit(List.of(sourceInput(connectorId, source, sourceSchema, sourceTable)), List.<Asset> of(output)));
             }
         }
