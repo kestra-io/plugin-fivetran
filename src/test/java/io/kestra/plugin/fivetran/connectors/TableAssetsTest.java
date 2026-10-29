@@ -103,12 +103,12 @@ class TableAssetsTest {
         assertThat(account.getMetadata().get("connectorId"), is(CONNECTOR_ID));
 
         // Every table is part of the connector asset, so the dependencies graph groups them under it.
-        assertThat(assets.get(0).getPartOf(), is(nullValue()));
+        assertThat(assets.getFirst().getPartOf(), is(nullValue()));
         assertThat(assets.get(1).getPartOf().id(), is(GROUP_ID + "." + SCHEMA));
         assertThat(assets.get(2).getPartOf().id(), is(GROUP_ID + "." + SCHEMA));
         // The connector asset carries lastSyncedAt too, for the asset card footer.
-        assertThat(assets.get(0).getMetadata().get("lastSyncedAt"), is(account.getMetadata().get("lastSyncedAt")));
-        assertThat(assets.get(0).getMetadata().get("lastSyncedAt"), is(notNullValue()));
+        assertThat(assets.getFirst().getMetadata().get("lastSyncedAt"), is(account.getMetadata().get("lastSyncedAt")));
+        assertThat(assets.getFirst().getMetadata().get("lastSyncedAt"), is(notNullValue()));
     }
 
     @Test

@@ -378,12 +378,12 @@ public class Sync extends AbstractFivetranConnection implements RunnableTask<Syn
                 );
                 finalConnector = candidate.get();
             } else {
-                // If polling only ever saw transient errors, name the last one so the failure is diagnosable
-                // instead of surfacing Await's generic "failed to terminate" message with no cause.
                 // The next attempt's window starts when this one ends, so a retry interval longer than maxDuration still resumes.
                 if (inFlight != null) {
                     writeCheckpoint(runContext, inFlight.withAttempt(Instant.now()));
                 }
+                // If polling only ever saw transient errors, name the last one so the failure is diagnosable
+                // instead of surfacing Await's generic "failed to terminate" message with no cause.
                 Exception last = lastTransientError.get();
                 if (last == null) {
                     throw e;

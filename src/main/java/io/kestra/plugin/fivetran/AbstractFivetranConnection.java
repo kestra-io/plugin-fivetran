@@ -659,10 +659,10 @@ public abstract class AbstractFivetranConnection extends Task {
 
     /**
      * One emit per table the connector writes, id {@code database.schema.name}, with the source table as
-     * input and the connector asset as {@code partOf}, so the dependencies graph groups a schema's tables. Returns empty rather than throwing when the database or the schema config is
-     * unavailable:
-     * lineage is metadata about the run, never the run itself, so a lineage read failure must not fail a
-     * sync that actually succeeded.
+     * input and the connector asset as {@code partOf}, so the dependencies graph groups a schema's tables.
+     * Returns empty rather than throwing when the database or the schema config is unavailable: lineage is
+     * metadata about the run, never the run itself, so a lineage read failure must not fail a sync that
+     * actually succeeded.
      */
     private List<AssetEmit> tableEmits(
         RunContext runContext,

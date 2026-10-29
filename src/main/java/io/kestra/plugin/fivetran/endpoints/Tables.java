@@ -61,7 +61,7 @@ public class Tables implements PluginEndpoint {
 
         var skip = (long) (page - 1) * size;
         var results = new ArrayList<Map<String, Object>>();
-        long[] counts = new long[2]; // [rows in the file, rows matching the filters]
+        var counts = new long[2]; // [rows in the file, rows matching the filters]
 
         open(context).ifPresent(file ->
         {
