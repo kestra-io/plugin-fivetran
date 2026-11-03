@@ -26,6 +26,11 @@ const exposes = Object.fromEntries(
                 slotName: "topology-task-modal",
                 path: "./src/components/ConnectorDetails.vue",
             },
+            {
+                slotName: "execution-artifact/details",
+                path: "./src/components/ConnectorDetails.vue",
+                additionalProperties: { title: "Fivetran details" },
+            },
         ],
     ]),
 );

@@ -54,9 +54,11 @@ const { t } = useI18n({
     },
 });
 
-const props = defineProps<KnownSlotProps["topology-task-modal"]>();
+// Shared by the topology dialog and the execution Artifacts tab, which has no `progress` prop.
+defineOptions({ inheritAttrs: false });
+const props = defineProps<KnownSlotProps["execution-artifact"]>();
 const { taskRunState, hasExecution, hasOutputs, isStatusOutput, connectors, notWaited } =
-    useConnectorData(props as KnownSlotProps["topology-details"]);
+    useConnectorData(props);
 
 const task = computed(() => props.task as Record<string, any> | undefined);
 const settingRows = computed(() =>
