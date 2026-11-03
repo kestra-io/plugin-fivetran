@@ -1,31 +1,13 @@
 import defaultViteConfig from "@kestra-io/artifact-sdk/vite.config";
 import { mergeConfig } from "vite";
 
-// Node base (56) + ~31.5px per row: 3/4 settings rows before a run, 5 rows with an execution.
-const HEIGHT_WITH_EXECUTION = 214;
-const TASKS = [
-    { type: "connectors.Sync", height: 150 },
-    { type: "connectors.Status", height: 182 },
-];
+const TASKS = ["connectors.Sync", "connectors.Status"];
 
-// A customAction with no property to show makes the host open a dialog rendering the topology-task-modal slot.
+// Only the execution Artifacts tab shows the connector details; the topology cards and dialog are gone.
 const exposes = Object.fromEntries(
-    TASKS.map(({ type, height }) => [
+    TASKS.map((type) => [
         type,
         [
-            {
-                slotName: "topology-details",
-                path: "./src/components/ConnectorTopologyDetails.vue",
-                additionalProperties: {
-                    height,
-                    heightWithExecution: HEIGHT_WITH_EXECUTION,
-                    customAction: { label: "Show Details" },
-                },
-            },
-            {
-                slotName: "topology-task-modal",
-                path: "./src/components/ConnectorDetails.vue",
-            },
             {
                 slotName: "execution-artifact/details",
                 path: "./src/components/ConnectorDetails.vue",

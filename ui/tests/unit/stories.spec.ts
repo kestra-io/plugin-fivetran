@@ -1,13 +1,11 @@
 import { describe, test } from "vitest";
 import { composeStories } from "@storybook/vue3";
 
-import * as topologyStories from "../storybook/components/ConnectorTopologyDetails.stories";
 import * as detailsStories from "../storybook/components/ConnectorDetails.stories";
 
 // composeStories turns each exported story into a portable, runnable component. Story.run() renders
 // it and executes its `play` function in jsdom, so no browser is needed.
 const suites = {
-    ConnectorTopologyDetails: composeStories(topologyStories),
     ConnectorDetails: composeStories(detailsStories),
 };
 

@@ -1,6 +1,6 @@
 # Fivetran plugin UI
 
-Vue 3 + Vite micro-frontend for the `io.kestra.plugin.fivetran` plugin. It adds a topology card and a details dialog to `connectors.Sync` and `connectors.Status`. Kestra 2.0+ shows them; Kestra 1.3.x ignores them.
+Vue 3 + Vite micro-frontend for the `io.kestra.plugin.fivetran` plugin. It adds an execution Artifacts tab entry to `connectors.Sync` and `connectors.Status`. Kestra 2.0+ shows it; Kestra 1.3.x ignores it.
 
 The components only read the task run's outputs through the `fetchOutputs` prop (falling back to `taskRun.outputs`). They make no HTTP call, and the `tables` file output is not displayed row by row because only its URI is available: they show its counts.
 

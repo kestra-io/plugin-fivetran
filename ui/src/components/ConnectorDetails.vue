@@ -54,7 +54,7 @@ const { t } = useI18n({
     },
 });
 
-// Shared by the topology dialog and the execution Artifacts tab, which has no `progress` prop.
+// Rendered in the execution Artifacts tab, which has no `progress` prop.
 defineOptions({ inheritAttrs: false });
 const props = defineProps<KnownSlotProps["execution-artifact"]>();
 const { taskRunState, hasExecution, hasOutputs, isStatusOutput, connectors, notWaited } =
