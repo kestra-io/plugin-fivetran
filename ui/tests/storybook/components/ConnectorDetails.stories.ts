@@ -25,7 +25,7 @@ setup((app) => {
 });
 
 const meta: Meta<typeof ConnectorDetails> = {
-    title: "Plugin UI / execution-artifact / ConnectorDetails",
+    title: "Plugin UI / topology-task-modal / ConnectorDetails",
     component: ConnectorDetails,
     tags: ["autodocs"],
 };
