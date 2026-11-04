@@ -15,7 +15,7 @@ describe("vite.config.ts exposes", () => {
     });
 
     test("no topology slot and no custom action", () => {
-        expect(config).not.toContain("slotName: \"topology");
+        expect(config).not.toContain('slotName: "topology');
         expect(config).not.toContain("customAction");
         expect(config).not.toContain("taskProp");
     });
