@@ -1,8 +1,8 @@
 import defaultViteConfig from "@kestra-io/artifact-sdk/vite.config";
 import { mergeConfig } from "vite";
 
-// Node base (56) + ~31.5px per row: 3/4 settings rows before a run, 5 rows with an execution.
-const HEIGHT_WITH_EXECUTION = 214;
+// With an execution the host draws a badge row (about 30px) under the node, so the card needs that much more room.
+const EXECUTION_BADGE_ROW = 30;
 const TASKS = [
     { type: "connectors.Sync", height: 150 },
     { type: "connectors.Status", height: 182 },
@@ -18,7 +18,7 @@ const exposes = Object.fromEntries(
                 path: "./src/components/ConnectorTopologyDetails.vue",
                 additionalProperties: {
                     height,
-                    heightWithExecution: HEIGHT_WITH_EXECUTION,
+                    heightWithExecution: height + EXECUTION_BADGE_ROW,
                     customAction: { label: "Show Details" },
                 },
             },

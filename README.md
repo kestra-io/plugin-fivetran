@@ -50,7 +50,7 @@
 
 ## UI
 
-On Kestra 2.0+, `connectors.Sync` and `connectors.Status` get a card under the node in the topology view (task settings before a run, sync state, freshness, alerts and table counts after) and a "Show Details" action that opens a per-connector dialog. Both only read the task run's outputs; they make no call to Fivetran. The source is in [`ui/`](ui/README.md). Requires Kestra 2.0.x.
+`connectors.Sync` and `connectors.Status` get a details card (task settings before a run, sync state, freshness, alerts and table counts after) and a per-connector details view. Kestra 2.0.x shows the card in the topology view, with a "Show Details" action that opens the details dialog. Kestra 2.1+ shows it behind the Artifacts button and in the Artifacts tab of the task popup. Both only read the task run's outputs; they make no call to Fivetran. The source is in [`ui/`](ui/README.md).
 
 Building the plugin runs the UI build, which needs Node.js 18 or later.
 

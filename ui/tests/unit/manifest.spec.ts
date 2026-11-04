@@ -15,6 +15,8 @@ describe("vite.config.ts exposes", () => {
         expect(config.match(/customAction: \{ label: "Show Details" \}/g)).toHaveLength(1);
         expect(config.match(/slotName: "topology-task-modal"/g)).toHaveLength(1);
         expect(config.match(/slotName: "topology-details"/g)).toHaveLength(1);
+        expect(config.match(/slotName: "execution-artifact\/details"/g)).toHaveLength(1);
+        expect(config).toContain("heightWithExecution: height + EXECUTION_BADGE_ROW");
     });
 
     test("no taskProp and no drawer slot", () => {
