@@ -58,7 +58,7 @@ Rules:
 - The components read only the task run's outputs, through the host's `fetchOutputs` prop falling back to `taskRun.outputs`, and reload once the task run is terminal. They make no HTTP call of their own and never call Fivetran.
 - Every output field is optional: executions from before the outputs existed, null table counts after a failed schema read and `wait: false` all render a placeholder.
 - Never render the `tables` file rows (only the counts; the slot props carry its URI, not its content), alert messages, connector `config` or destination data. None of it is in the outputs, and the settings reader never touches `apiKey`/`apiSecret`.
-- `height`/`heightWithExecution` in `ui/vite.config.ts` must match the rendered row counts (about 56px plus 31.5px per row). Update them when a row is added or removed.
+- `height`/`heightWithExecution` in `ui/vite.config.ts` must match the rendered row counts (about 56px plus 31.5px per row). `heightWithExecution` is shared by both tasks (5 result rows, plus the 30px badge row). Update them when a row is added or removed.
 - `ui/vite.config.ts` caps Module Federation chunk names: with the `io.kestra.plugin.fivetran` remote name the longest virtual chunk name is 256 characters, one over the 255-byte file name limit on Linux, and the build fails without the cap.
 - Gradle runs `npm install` and `npm run build -- --outDir ../src/main/resources/plugin-ui` (tasks `npmInstallUI` and `buildUI`) before packaging, so building the plugin needs Node.js 18+. `src/main/resources/plugin-ui/` is build output and is git-ignored. The plugin targets Kestra 2.0.x (Java 25) and no longer supports 1.3.x.
 - Checks: `npm test`, `npm run lint` and `npm run format` in `ui/`.
