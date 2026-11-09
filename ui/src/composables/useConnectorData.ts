@@ -2,7 +2,8 @@ import type { KnownSlotProps } from "@kestra-io/artifact-sdk";
 import { computed, ref, watch } from "vue";
 import { TERMINAL_STATES } from "./states";
 
-type SlotProps = KnownSlotProps["topology-details"];
+// The artifact props are the topology ones minus `progress`, which this composable never reads.
+type SlotProps = KnownSlotProps["execution-artifact"];
 
 // One connector, whichever task produced it; every field is optional (old executions, failed schema read).
 export interface ConnectorView {
