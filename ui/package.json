@@ -21,7 +21,7 @@
     "@kestra-io/artifact-sdk": "^0.3.1",
     "@kestra-io/design-system": "^0.3.0",
     "element-plus": "^2.14.0",
-    "vue": "^3.5.34",
+    "vue": "^3.5.46",
     "vue-i18n": "^11.4.4"
   },
   "devDependencies": {
